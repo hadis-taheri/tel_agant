@@ -1,0 +1,44 @@
+name: Daily podcast digest
+
+# Runs every day at 12:00 (noon) Iran Standard Time.
+# Iran has used a fixed UTC+3:30 offset (no DST) since 1401 (2022), so that's
+# a constant 08:30 UTC year-round.
+on:
+  schedule:
+    - cron: "30 8 * * *"
+  workflow_dispatch: {} # allows manually triggering a run from the Actions tab
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the agent (phase 1 + one backlog episode)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: python main.py
+
+      - name: Upload log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-log
+          path: agent.log

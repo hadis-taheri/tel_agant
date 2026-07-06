@@ -68,6 +68,25 @@ main.py          -> هماهنگ‌کننده‌ی کل فرایند (فاز ۱:
    لینوکس) برای اجرای دوره‌ای `python main.py` استفاده کنید — این‌طوری اگر پروسه کرش کند، خودش
    دوباره در سیکل بعدی اجرا می‌شود.
 
+## اجرای خودکار روزانه با GitHub Actions
+
+فایل [`.github/workflows/daily-post.yml`](.github/workflows/daily-post.yml) هر روز ساعت ۱۲ ظهر
+به وقت ایران (۰۸:۳۰ UTC — ایران از ۱۴۰۱ ساعت تابستانی ندارد، پس این آفست ثابت است) به‌صورت خودکار
+`python main.py` را روی گیت‌هاب اجرا می‌کند (هم اپیزود جدید چک می‌شود، هم یک اپیزود از آرشیو).
+
+برای فعال شدنش باید این ۵ مقدار را به‌عنوان **Repository Secret** اضافه کنید (نه در کد، برای
+امنیت): در گیت‌هاب بروید به Settings → Secrets and variables → Actions → New repository secret،
+و همین ۵ نام و مقدار مربوط به فایل `.env` خودتان را وارد کنید:
+
+- `SUPABASE_URL`
+- `SUPABASE_KEY`
+- `GROQ_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHANNEL_ID`
+
+بعد از اضافه‌کردن Secretها، می‌توانید از تب **Actions** روی گیت‌هاب، ورک‌فلو «Daily podcast digest»
+را با دکمه‌ی **Run workflow** یک‌بار دستی هم تست کنید تا مطمئن شوید همه‌چیز درست کار می‌کند.
+
 ## فاز ۲ — پردازش آرشیو قدیمی (Backlog Mode)
 
 هر اجرای `python main.py` (چه تک‌باره، چه با `--loop`) از این به بعد دو کار می‌کند:

@@ -9,8 +9,16 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 logger = logging.getLogger(__name__)
 
-# Keep well under Groq's free-tier tokens-per-minute limits for a single call.
-MAX_TRANSCRIPT_CHARS = 90_000
+# Keep well under Groq's free-tier tokens-per-minute limit (12,000 TPM as of
+# writing). This is a BYTE budget, not a character count, and it's tuned for
+# the worst case: Chinese text runs roughly 3 bytes/char in UTF-8 *and*
+# tokenizes far more densely than English (~0.3 tokens/byte vs ~0.25
+# tokens/char for English), so a naive character-count cap sized for English
+# silently produced requests 2-3x the size expected on Chinese episodes and
+# hit real "413 Request too large ... tokens per minute" errors in production.
+# 25,000 bytes of Chinese was empirically verified to cost ~7,800 total tokens
+# (prompt + completion) against this account's limit, leaving real headroom.
+MAX_TRANSCRIPT_BYTES = 25_000
 
 # The model occasionally leaks stray non-Persian script characters (CJK,
 # Cyrillic, Hangul, Kana) into an otherwise Persian output. These ranges
@@ -69,13 +77,17 @@ USER_PROMPT_TEMPLATE = """\
 
 
 def _truncate(transcript: str) -> str:
-    if len(transcript) <= MAX_TRANSCRIPT_CHARS:
+    encoded = transcript.encode("utf-8")
+    if len(encoded) <= MAX_TRANSCRIPT_BYTES:
         return transcript
     logger.warning(
-        "Transcript too long (%d chars), truncating to %d chars before sending to the LLM",
-        len(transcript), MAX_TRANSCRIPT_CHARS,
+        "Transcript too long (%d bytes), truncating to %d bytes before sending to the LLM",
+        len(encoded), MAX_TRANSCRIPT_BYTES,
     )
-    return transcript[:MAX_TRANSCRIPT_CHARS] + "\n...[transcript truncated]"
+    # Slicing raw UTF-8 bytes can land mid-character; decode with errors="ignore"
+    # to drop any incomplete trailing byte sequence instead of raising/corrupting.
+    truncated = encoded[:MAX_TRANSCRIPT_BYTES].decode("utf-8", errors="ignore")
+    return truncated + "\n...[transcript truncated]"
 
 
 @retry(
@@ -92,7 +104,7 @@ def _generate_once(client: Groq, model: str, user_prompt: str, temperature: floa
             {"role": "user", "content": user_prompt},
         ],
         temperature=temperature,
-        max_tokens=2000,
+        max_tokens=1500,
     )
     return completion.choices[0].message.content.strip()
 

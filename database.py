@@ -11,6 +11,9 @@ Table schema (create once in the Supabase SQL editor — see supabase_schema.sql
         audio_url     text,
         published_at  timestamptz,
         status        text not null default 'pending',
+        -- status values: pending, downloading, transcribed, summarized,
+        -- posted (phase 1 live episode), processed (phase 2 backlog episode),
+        -- failed, seeded (pre-existing episode explicitly skipped)
         transcript    text,
         summary_html  text,
         telegram_message_id bigint,
@@ -31,11 +34,12 @@ logger = logging.getLogger(__name__)
 
 TABLE = "episodes"
 
-STATUS_PENDING = "pending"
+STATUS_PENDING = "pending"          # queued, not processed yet (newly-discovered or backlog)
 STATUS_DOWNLOADING = "downloading"
 STATUS_TRANSCRIBED = "transcribed"
 STATUS_SUMMARIZED = "summarized"
-STATUS_POSTED = "posted"
+STATUS_POSTED = "posted"            # phase 1: freshly-discovered episode, processed and posted
+STATUS_PROCESSED = "processed"      # phase 2: backlog episode, processed and posted
 STATUS_FAILED = "failed"
 STATUS_SEEDED = "seeded"  # pre-existing episode marked as seen without processing
 
@@ -103,6 +107,22 @@ class EpisodeStore:
         }
         resp = self.client.table(TABLE).insert(row).execute()
         return resp.data[0]["id"]
+
+    def get_oldest_pending(self) -> Optional[dict]:
+        """Return the oldest (by published date) episode still queued as 'pending', or None.
+
+        Used by backlog processing (phase 2) to work through the historical
+        archive one episode at a time, oldest first.
+        """
+        resp = (
+            self.client.table(TABLE)
+            .select("*")
+            .eq("status", STATUS_PENDING)
+            .order("published_at", desc=False, nullsfirst=False)
+            .limit(1)
+            .execute()
+        )
+        return resp.data[0] if resp.data else None
 
     def update(self, episode_id: int, **fields) -> None:
         fields["updated_at"] = datetime.utcnow().isoformat()

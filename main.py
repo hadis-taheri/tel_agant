@@ -1,9 +1,20 @@
 """Orchestrator: scrape -> transcribe -> summarize/translate -> post to Telegram.
 
+Two coordinated workflows:
+    Phase 1 - new episodes: each run checks sources for episodes published
+        since the last check and processes all of them (capped at
+        MAX_EPISODES_PER_RUN), marking them 'posted'.
+    Phase 2 - historical backlog: each run also queues any not-yet-seen
+        archive episodes as 'pending', then processes exactly one
+        oldest-pending episode, marking it 'processed'. This works through a
+        source's entire history gradually (e.g. one per day) instead of
+        transcribing hundreds of old episodes at once.
+
 Usage:
-    python main.py            # run a single pass and exit
-    python main.py --loop     # keep running, checking sources every
-                               # CHECK_INTERVAL_MINUTES (see .env)
+    python main.py                  # run phase 1 + one phase-2 backlog step, then exit
+    python main.py --loop           # keep running both, every CHECK_INTERVAL_MINUTES
+    python main.py --process-backlog  # run only the phase-2 backlog step
+    python main.py --seed-only      # mark current archive as already-seen, skipping backlog
 """
 import argparse
 import logging
@@ -11,6 +22,7 @@ import sys
 import time
 
 from config import load_settings, Settings
+import database
 from database import EpisodeStore, Episode
 import scraper
 import transcriber
@@ -25,17 +37,18 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 
-def process_episode(settings: Settings, store: EpisodeStore, raw_ep: scraper.RawEpisode) -> None:
-    episode = Episode(
-        source=raw_ep.source,
-        external_id=raw_ep.external_id,
-        title=raw_ep.title,
-        episode_url=raw_ep.episode_url,
-        audio_url=raw_ep.audio_url,
-        published_at=raw_ep.published_at,
-    )
-    episode_id = store.insert_pending(episode)
+def _run_pipeline(
+    settings: Settings,
+    store: EpisodeStore,
+    episode_id: int,
+    raw_ep: scraper.RawEpisode,
+    final_status: str,
+) -> None:
+    """Transcribe -> summarize -> post an already-recorded episode row.
 
+    Shared by both phase 1 (new episodes, final_status='posted') and phase 2
+    (backlog episodes, final_status='processed').
+    """
     try:
         logger.info("[%s] Transcribing: %s", episode_id, raw_ep.title)
         transcript = transcriber.transcribe_episode(
@@ -46,7 +59,7 @@ def process_episode(settings: Settings, store: EpisodeStore, raw_ep: scraper.Raw
         )
         if not transcript.strip():
             raise ValueError("Empty transcript returned by STT")
-        store.mark_status(episode_id, "transcribed", transcript=transcript)
+        store.mark_status(episode_id, database.STATUS_TRANSCRIBED, transcript=transcript)
 
         logger.info("[%s] Summarizing/translating to Persian", episode_id)
         summary_html = summarizer.summarize_to_persian_html(
@@ -55,7 +68,7 @@ def process_episode(settings: Settings, store: EpisodeStore, raw_ep: scraper.Raw
             groq_api_key=settings.groq_api_key,
             model=settings.groq_llm_model,
         )
-        store.mark_status(episode_id, "summarized", summary_html=summary_html)
+        store.mark_status(episode_id, database.STATUS_SUMMARIZED, summary_html=summary_html)
 
         logger.info("[%s] Posting to Telegram", episode_id)
         source_label = "sv101" if raw_ep.source == scraper.SOURCE_SV101 else "Crossing Podcast"
@@ -66,12 +79,26 @@ def process_episode(settings: Settings, store: EpisodeStore, raw_ep: scraper.Raw
             episode_url=raw_ep.episode_url,
             source_label=source_label,
         )
-        store.mark_status(episode_id, "posted", telegram_message_id=message_id)
-        logger.info("[%s] Done: posted as Telegram message %s", episode_id, message_id)
+        store.mark_status(episode_id, final_status, telegram_message_id=message_id)
+        logger.info("[%s] Done: %s as Telegram message %s", episode_id, final_status, message_id)
 
     except Exception as exc:  # noqa: BLE001 - top-level per-episode guard
         logger.exception("[%s] Failed to process episode %r", episode_id, raw_ep.title)
         store.mark_failed(episode_id, exc)
+
+
+def process_episode(settings: Settings, store: EpisodeStore, raw_ep: scraper.RawEpisode) -> None:
+    """Phase 1: record and process a freshly-discovered episode, marking it 'posted'."""
+    episode = Episode(
+        source=raw_ep.source,
+        external_id=raw_ep.external_id,
+        title=raw_ep.title,
+        episode_url=raw_ep.episode_url,
+        audio_url=raw_ep.audio_url,
+        published_at=raw_ep.published_at,
+    )
+    episode_id = store.insert_pending(episode)
+    _run_pipeline(settings, store, episode_id, raw_ep, final_status=database.STATUS_POSTED)
 
 
 def seed_existing_episodes(settings: Settings) -> int:
@@ -128,14 +155,84 @@ def run_once(settings: Settings) -> int:
     return len(new_episodes)
 
 
+def scrape_backlog(settings: Settings) -> int:
+    """Queue any not-yet-seen archive episode from any source as 'pending'.
+
+    Safe to call repeatedly: already-known episodes (whether seeded, pending,
+    or already processed) are skipped.
+    """
+    store = EpisodeStore(settings.supabase_url, settings.supabase_key)
+    try:
+        raw_episodes = scraper.fetch_full_archive(settings.crossingpodcast_api, settings.sv101_rss_url)
+    except Exception:
+        logger.exception("Failed to fetch archive; skipping backlog scrape")
+        return 0
+
+    queued = 0
+    for raw_ep in raw_episodes:
+        if store.is_known(raw_ep.source, raw_ep.external_id):
+            continue
+        episode = Episode(
+            source=raw_ep.source,
+            external_id=raw_ep.external_id,
+            title=raw_ep.title,
+            episode_url=raw_ep.episode_url,
+            audio_url=raw_ep.audio_url,
+            published_at=raw_ep.published_at,
+        )
+        store.insert_pending(episode)
+        queued += 1
+
+    if queued:
+        logger.info("Queued %d new archive episode(s) into the backlog.", queued)
+    return queued
+
+
+def process_backlog_once(settings: Settings) -> bool:
+    """Phase 2: ensure the backlog is populated, then process exactly one
+    oldest-pending episode, marking it 'processed'. Returns True if an
+    episode was processed, False if the backlog is empty."""
+    store = EpisodeStore(settings.supabase_url, settings.supabase_key)
+    scrape_backlog(settings)
+
+    row = store.get_oldest_pending()
+    if not row:
+        logger.info("Backlog is empty: no pending archive episodes to process.")
+        return False
+
+    logger.info("[%s] Processing oldest backlog episode: %r", row["id"], row["title"])
+    raw_ep = scraper.RawEpisode(
+        source=row["source"],
+        external_id=row["external_id"],
+        title=row["title"],
+        episode_url=row["episode_url"],
+        audio_url=row["audio_url"],
+        published_at=row["published_at"],
+    )
+    _run_pipeline(settings, store, row["id"], raw_ep, final_status=database.STATUS_PROCESSED)
+    return True
+
+
+def daily_cycle(settings: Settings) -> None:
+    """Phase 1 (new episodes) followed by phase 2 (one backlog episode)."""
+    run_once(settings)
+    process_backlog_once(settings)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Podcast scraping/transcription/summarization Telegram agent")
     parser.add_argument("--loop", action="store_true", help="Keep running and re-check sources periodically")
     parser.add_argument(
         "--seed-only",
         action="store_true",
-        help="Mark all currently-found episodes as already-seen without processing them, then exit "
-        "(run this once after setup to skip backfilling a source's entire history)",
+        help="Mark all currently-found (latest-page) episodes as already-seen without processing them, "
+        "then exit (skips backfilling a source's recent history; does not affect backlog processing)",
+    )
+    parser.add_argument(
+        "--process-backlog",
+        action="store_true",
+        help="Only run the phase-2 backlog step: queue any new historical episodes as pending, "
+        "then process exactly one oldest-pending episode, then exit",
     )
     args = parser.parse_args()
 
@@ -145,16 +242,20 @@ def main() -> None:
         seed_existing_episodes(settings)
         return
 
+    if args.process_backlog:
+        process_backlog_once(settings)
+        return
+
     if not args.loop:
-        run_once(settings)
+        daily_cycle(settings)
         return
 
     logger.info("Starting loop mode: checking every %d minute(s).", settings.check_interval_minutes)
     while True:
         try:
-            run_once(settings)
+            daily_cycle(settings)
         except Exception:
-            logger.exception("Unexpected error during run_once; will retry next cycle")
+            logger.exception("Unexpected error during daily_cycle; will retry next cycle")
         time.sleep(settings.check_interval_minutes * 60)
 
 

@@ -5,7 +5,8 @@ Source 1 - crossingpodcast.com
     tRPC API which we call directly: GET /api/trpc/episodes.list?input={"json":{}}
     Returns the most recent episodes (newest first), each already carrying an
     English title/summary plus a direct audio URL (the underlying show is hosted
-    on xiaoyuzhoufm.com, so audio is in Chinese).
+    on xiaoyuzhoufm.com, so audio is in Chinese). The same endpoint paginates via
+    a `page` param (20 items/page); used to walk the full historical archive.
 
 Source 2 - sv101.fireside.fm
     Fireside-hosted podcasts always expose a standard RSS feed
@@ -49,20 +50,7 @@ def _retry_network():
     )
 
 
-@_retry_network()
-def fetch_crossingpodcast_episodes(api_base: str) -> List[RawEpisode]:
-    """Fetch the latest episode list from crossingpodcast.com's tRPC API."""
-    query = quote('{"json":{}}')
-    url = f"{api_base}?input={query}"
-    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=HTTP_TIMEOUT)
-    resp.raise_for_status()
-    payload = resp.json()
-
-    try:
-        items = payload["result"]["data"]["json"]["items"]
-    except (KeyError, TypeError) as exc:
-        raise ValueError(f"Unexpected crossingpodcast API response shape: {payload}") from exc
-
+def _parse_crossingpodcast_items(items: list) -> List[RawEpisode]:
     episodes = []
     for item in items:
         slug = item.get("slug")
@@ -81,7 +69,50 @@ def fetch_crossingpodcast_episodes(api_base: str) -> List[RawEpisode]:
                 published_at=item.get("publishDate"),
             )
         )
-    logger.info("crossingpodcast: found %d episodes", len(episodes))
+    return episodes
+
+
+@_retry_network()
+def _fetch_crossingpodcast_page(api_base: str, page: int) -> tuple[List[RawEpisode], int]:
+    """Fetch one page (20 items) of the crossingpodcast tRPC episode list.
+
+    Returns (episodes_on_this_page, total_episode_count_reported_by_the_api).
+    """
+    query = quote(f'{{"json":{{"page":{page}}}}}')
+    url = f"{api_base}?input={query}"
+    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    try:
+        data = payload["result"]["data"]["json"]
+        items = data["items"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"Unexpected crossingpodcast API response shape: {payload}") from exc
+
+    return _parse_crossingpodcast_items(items), data.get("total", 0)
+
+
+def fetch_crossingpodcast_episodes(api_base: str) -> List[RawEpisode]:
+    """Fetch only the most recent page of episodes (cheap check for new episodes)."""
+    episodes, _total = _fetch_crossingpodcast_page(api_base, page=1)
+    logger.info("crossingpodcast: found %d episodes (latest page)", len(episodes))
+    return episodes
+
+
+def fetch_crossingpodcast_archive(api_base: str) -> List[RawEpisode]:
+    """Walk every page of the crossingpodcast tRPC API to collect the full historical archive."""
+    episodes: List[RawEpisode] = []
+    page = 1
+    while True:
+        page_episodes, total = _fetch_crossingpodcast_page(api_base, page=page)
+        if not page_episodes:
+            break
+        episodes.extend(page_episodes)
+        if len(episodes) >= total:
+            break
+        page += 1
+    logger.info("crossingpodcast: found %d episodes in full archive", len(episodes))
     return episodes
 
 
@@ -121,7 +152,7 @@ def fetch_sv101_episodes(rss_url: str) -> List[RawEpisode]:
 
 
 def fetch_all_episodes(crossingpodcast_api: str, sv101_rss_url: str) -> List[RawEpisode]:
-    """Fetch episodes from every configured source, tolerating per-source failures."""
+    """Fetch the latest episodes from every configured source (cheap, for new-episode checks)."""
     episodes: List[RawEpisode] = []
     for name, fetch_fn, arg in (
         ("crossingpodcast", fetch_crossingpodcast_episodes, crossingpodcast_api),
@@ -131,4 +162,23 @@ def fetch_all_episodes(crossingpodcast_api: str, sv101_rss_url: str) -> List[Raw
             episodes.extend(fetch_fn(arg))
         except Exception:
             logger.exception("Failed to fetch episodes from source=%s; continuing with other sources", name)
+    return episodes
+
+
+def fetch_full_archive(crossingpodcast_api: str, sv101_rss_url: str) -> List[RawEpisode]:
+    """Fetch the entire historical archive from every configured source.
+
+    sv101's RSS feed already lists every episode in one response, so
+    `fetch_sv101_episodes` doubles as its archive fetch; crossingpodcast needs
+    explicit pagination via `fetch_crossingpodcast_archive`.
+    """
+    episodes: List[RawEpisode] = []
+    for name, fetch_fn, arg in (
+        ("crossingpodcast", fetch_crossingpodcast_archive, crossingpodcast_api),
+        ("sv101", fetch_sv101_episodes, sv101_rss_url),
+    ):
+        try:
+            episodes.extend(fetch_fn(arg))
+        except Exception:
+            logger.exception("Failed to fetch archive from source=%s; continuing with other sources", name)
     return episodes

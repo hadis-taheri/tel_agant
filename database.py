@@ -108,18 +108,20 @@ class EpisodeStore:
         resp = self.client.table(TABLE).insert(row).execute()
         return resp.data[0]["id"]
 
-    def get_last_finalized_source(self) -> Optional[str]:
-        """Return the source of the most recently posted/processed episode, or
-        None if none exist yet. Used to alternate sources between backlog runs."""
+    def get_last_finalized(self) -> Optional[dict]:
+        """Return {"source", "updated_at"} of the most recently posted/processed
+        episode, or None if none exist yet. Used both to alternate sources
+        between backlog runs and to throttle how often phase 2 does real work
+        (see MIN_BACKLOG_INTERVAL_MINUTES in main.py)."""
         resp = (
             self.client.table(TABLE)
-            .select("source")
+            .select("source, updated_at")
             .in_("status", [STATUS_POSTED, STATUS_PROCESSED])
             .order("updated_at", desc=True)
             .limit(1)
             .execute()
         )
-        return resp.data[0]["source"] if resp.data else None
+        return resp.data[0] if resp.data else None
 
     def get_oldest_pending(self, exclude_source: Optional[str] = None) -> Optional[dict]:
         """Return the oldest (by published date) episode still queued as 'pending', or None.

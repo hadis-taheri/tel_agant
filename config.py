@@ -33,6 +33,7 @@ class Settings:
 
     check_interval_minutes: int
     max_episodes_per_run: int
+    min_backlog_interval_minutes: int
     temp_dir: str
 
 
@@ -51,5 +52,6 @@ def load_settings() -> Settings:
         sv101_rss_url=os.getenv("SV101_RSS_URL", "https://feeds.fireside.fm/sv101/rss"),
         check_interval_minutes=int(os.getenv("CHECK_INTERVAL_MINUTES", "60")),
         max_episodes_per_run=int(os.getenv("MAX_EPISODES_PER_RUN", "3")),
+        min_backlog_interval_minutes=int(os.getenv("MIN_BACKLOG_INTERVAL_MINUTES", "50")),
         temp_dir=os.getenv("TEMP_DIR", "./tmp_audio"),
     )

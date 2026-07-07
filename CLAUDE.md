@@ -58,14 +58,18 @@ meaning "explicitly skipped, never process". The only branch is the final status
   every not-yet-known episode found there (capped by `MAX_EPISODES_PER_RUN`), oldest first.
 - Phase 2 (`scrape_backlog` + `process_backlog_once`): walks each source's *entire* historical
   archive, queues anything not-yet-known as `pending`, then processes exactly **one**
-  oldest-`pending` row per invocation. This is deliberate throttling — it's how hundreds of old
-  episodes get processed one-at-a-time (roughly hourly via the GitHub Actions schedule, though see
-  the scheduling note below) instead of all at once on first run.
+  oldest-`pending` row per invocation *at most once every `MIN_BACKLOG_INTERVAL_MINUTES`
+  (default 50)* — this is deliberate throttling, both to work through hundreds of old episodes
+  one-at-a-time instead of all at once on first run, and to cap real Groq token spend per day
+  (see the scheduling note below for why the second part matters: the GitHub Actions cron fires
+  4x/hour, not once, so without a wall-clock throttle every firing that lands would process a
+  *different* episode). `scrape_backlog` (queueing) always runs regardless of the throttle since
+  it costs no LLM tokens; only the actual `_run_pipeline` call is gated.
   `EpisodeStore.get_oldest_pending(exclude_source=...)` alternates which
   source that one episode comes from: `process_backlog_once` looks up the source of the
-  most-recently-finalized episode (`get_last_finalized_source`) and prefers the *other* source's
+  most-recently-finalized episode (`get_last_finalized`) and prefers the *other* source's
   oldest pending row, falling back to any pending row if that source's backlog is empty. This
-  means consecutive hourly runs alternate crossingpodcast/sv101 instead of draining one source's
+  means consecutive backlog runs alternate crossingpodcast/sv101 instead of draining one source's
   entire archive before ever touching the other.
 - `daily_cycle()` just runs phase 1 then phase 2; `--loop` repeats `daily_cycle` on a timer.
   `main.py`'s own `_run_pipeline()` is the only place that actually calls transcriber/summarizer/
@@ -154,6 +158,16 @@ in practice), just adding some latency per episode rather than failing it. Re-ve
 math against the actual account limit before raising `MAX_TRANSCRIPT_BYTES` or either step's
 `max_tokens`.
 
+There is *also* a separate, larger-window cap: **200,000 tokens/day (TPD)** for this model on this
+account, confirmed by hitting it directly (`Limit 200000, Used 199151`) during a heavy day of
+manual debugging. A normal two-step-pivot episode (bridge + Persian) costs roughly 10,000-11,000
+tokens total, so 200k/day supports on the order of 18-19 real episodes/day *before accounting for
+any retries* — plenty for the intended cadence (about one backlog episode/hour) but not something
+to take for granted if `MIN_BACKLOG_INTERVAL_MINUTES` (see the phase-2 note above) is ever removed
+or lowered carelessly. Manual one-off debugging/regeneration (like the kind used to verify each fix
+in this history) burns through this same daily budget fast — expect to occasionally hit this cap
+during active development and just wait for the daily reset rather than assume the code is broken.
+
 **Failed episodes aren't automatically retried**: `EpisodeStore.is_known()` only checks
 `(source, external_id)` existence, not status — a row with `status='failed'` is still "known" and
 will never be picked up again by `run_once`/`process_backlog_once` on its own. To retry one,
@@ -193,10 +207,15 @@ directly against the Actions API on 2026-07-07 — only 2 of ~10 expected hourly
 10-hour window, and even after moving off the top-of-hour minute (GitHub's documented congestion
 advice), the very next scheduled run still didn't fire at all. GitHub's schedule event has no SLA
 and can simply be dropped, independent of which minute it's queued for. The cron now fires 4x/hour
-(`7,22,37,52 * * * *`) so a single dropped tick doesn't cost a whole hour; this is safe because
-`main.py` is idempotent (dedup by `(source, external_id)`, at most one backlog episode processed
-per invocation) — extra runs landing in the same hour just advance the backlog faster, they don't
-double-post. If posts stop appearing again, check the Actions run list
+(`7,22,37,52 * * * *`) so a single dropped tick doesn't cost a whole hour. `main.py` won't
+double-post from this (dedup by `(source, external_id)`), but extra runs landing in the same hour
+*would* each process a different backlog episode and pay real Groq tokens for it if nothing else
+stopped them — a real risk once discovered in practice: at ~10-11k tokens/episode (two-step
+pivot, see summarizer.py notes above), 4 real episodes/hour for a full day would blow through
+Groq's 200k-tokens/day cap in a matter of hours. `process_backlog_once`'s wall-clock throttle
+(`MIN_BACKLOG_INTERVAL_MINUTES`, see the phase-2 note above) is what actually keeps this safe —
+the 4x/hour cron is purely a safety net for GitHub dropping ticks, not a multiplier on real work.
+If posts stop appearing again, check the Actions run list
 (`https://api.github.com/repos/<owner>/<repo>/actions/workflows/daily-post.yml/runs`) before
 assuming the pipeline code itself is broken.
 

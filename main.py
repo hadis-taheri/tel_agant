@@ -20,6 +20,7 @@ import argparse
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 
 from config import load_settings, Settings
 import database
@@ -188,17 +189,39 @@ def scrape_backlog(settings: Settings) -> int:
 def process_backlog_once(settings: Settings) -> bool:
     """Phase 2: ensure the backlog is populated, then process exactly one
     oldest-pending episode, marking it 'processed'. Returns True if an
-    episode was processed, False if the backlog is empty.
+    episode was processed, False if the backlog is empty or the throttle
+    below skipped this invocation.
 
     Alternates sources run to run: picks the oldest pending episode from a
     source different than whichever source was posted/processed last, so
     consecutive backlog runs alternate crossingpodcast/sv101 instead of
     draining one source's entire archive before touching the other.
+
+    Throttled to at most one real (LLM-costing) episode per
+    MIN_BACKLOG_INTERVAL_MINUTES, independent of how often this function is
+    actually invoked. The GitHub Actions schedule fires 4x/hour as a safety
+    net against GitHub's own schedule trigger being unreliable (see
+    CLAUDE.md) -- without this throttle, every one of those 4 firings that
+    happens to land would process (and pay Groq tokens for) a *different*
+    backlog episode, which at ~10-11k tokens/episode could burn through
+    Groq's 200k-tokens/day cap in a matter of hours on a day the schedule
+    behaves well, then stall for the rest of the day.
     """
     store = EpisodeStore(settings.supabase_url, settings.supabase_key)
     scrape_backlog(settings)
 
-    last_source = store.get_last_finalized_source()
+    last = store.get_last_finalized()
+    if last:
+        last_at = datetime.fromisoformat(last["updated_at"].replace("Z", "+00:00"))
+        elapsed_minutes = (datetime.now(timezone.utc) - last_at).total_seconds() / 60
+        if elapsed_minutes < settings.min_backlog_interval_minutes:
+            logger.info(
+                "Last backlog episode finalized %.0f min ago (< %d min throttle); skipping this tick.",
+                elapsed_minutes, settings.min_backlog_interval_minutes,
+            )
+            return False
+
+    last_source = last["source"] if last else None
     row = store.get_oldest_pending(exclude_source=last_source)
     if not row:
         logger.info("Backlog is empty: no pending archive episodes to process.")

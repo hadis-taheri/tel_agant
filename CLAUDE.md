@@ -116,16 +116,24 @@ will never be picked up again by `run_once`/`process_backlog_once` on its own. T
 either delete its row or manually reset its `status` back to `pending` (see README's "نکات مهم"
 section) — there's no code path that does this automatically.
 
-**Telegram delivery**: `telegram_bot.py` opens every post with a photo from `assets/topic_banner_*.jpg`
-(picked at random) using the summary's title as the caption, then sends the rest of the body as
-follow-up text message(s), splitting on paragraph boundaries when needed (Telegram's 4096-char
-text / 1024-char caption limits). There's deliberately no link back to the source episode in the
-post: Telegram auto-previews any URL in a message, and the source pages (crossingpodcast.com,
-fireside.fm) are Chinese, so a source link pulled in a Chinese title/description/cover image via
-the auto-preview — the banner images exist specifically to replace that with something on-brand.
-The banners are static images generated once via `gen_banners.py` (PIL, abstract network/circuit
-art) and checked into `assets/`, not a live image-search API call, so there's nothing external to
-rate-limit or go down. Re-run `gen_banners.py` to regenerate/vary the set.
+**Telegram delivery is one message per episode, by design**: the whole post (title + body) is sent
+as a single `send_photo` call with the summary as the caption, not photo-then-text. This is why
+`summarizer.py`'s prompt caps the summary at ~800 chars (2 short paragraphs) — Telegram hard-limits
+photo captions to 1024 characters, so the summary has to be short enough to fit *with* the image in
+one message, not just short enough for a text message (4096-char limit, much roomier). If the LLM
+ignores that budget anyway, `summarizer._fit_to_caption_limit()` trims on a clean boundary
+(paragraph break or sentence-ending punctuation) and re-closes any HTML tag left open by the cut,
+and `telegram_bot.py` has one more fallback layer beyond that (photo+title, then the rest as
+separate text messages) so a send never just fails outright. Don't casually raise the ~800-char
+prompt target without re-checking this whole chain still fits under 1024 in practice.
+
+There's deliberately no link back to the source episode in the post: Telegram auto-previews any URL
+in a message, and the source pages (crossingpodcast.com, fireside.fm) are Chinese, so a source link
+pulled in a Chinese title/description/cover image via the auto-preview. The photo is either an
+episode-specific image (`image_generator.py`) or, if that fails, a generic banner from
+`assets/topic_banner_*.jpg` (static images generated once via `gen_banners.py`, not a live API
+call, so there's nothing external to rate-limit or go down for the fallback path). Re-run
+`gen_banners.py` to regenerate/vary that fallback set.
 
 ## External accounts this project depends on
 

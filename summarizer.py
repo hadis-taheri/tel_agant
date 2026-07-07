@@ -36,6 +36,13 @@ GENERATION_ATTEMPTS = 3
 # garbage. Above this ratio we raise instead of shipping a broken summary.
 _MAX_FOREIGN_SCRIPT_RATIO = 0.15
 
+# The whole post is sent as a single photo caption (see telegram_bot.py), and
+# Telegram hard-caps captions at 1024 characters. The prompt asks for ~800
+# chars, but LLMs don't reliably hit an exact character budget, so this is a
+# backstop: trim on a clean boundary rather than let a caption send fail.
+TELEGRAM_CAPTION_MAX_LEN = 1024
+_CAPTION_SAFETY_MARGIN = 20
+
 # Only tags Telegram's HTML parse_mode actually supports.
 SYSTEM_PROMPT = """\
 تو یک تولیدکننده‌ی محتوای حرفه‌ای فارسی‌زبان هستی که برای یک کانال تلگرامی پادکست می‌نویسی —
@@ -51,18 +58,19 @@ SYSTEM_PROMPT = """\
    ترجمه یا فارسی‌نویسی نکن؛ همیشه دقیقاً به همان شکل انگلیسی/لاتین اصلی‌شان در متن بیاور
    (نه ترانویسی فارسی مثل «جی‌پی‌تی» یا «کلاد»).
 
-۲. نوشتن جذاب و مبتنی بر تکنیک‌های تولید محتوا (نه صرفاً خلاصه‌نویسی ساده):
+۲. نوشتن جذاب و مبتنی بر تکنیک‌های تولید محتوا (نه صرفاً خلاصه‌نویسی ساده)، اما بسیار فشرده و کوتاه:
+   این پست زیر یک عکس در تلگرام به‌عنوان کپشن قرار می‌گیرد و تلگرام کپشن را به ۱۰۲۴ کاراکتر
+   محدود می‌کند؛ پس کل خروجی تو (عنوان + متن، با احتساب تگ‌های HTML) باید **حداکثر ۸۰۰ کاراکتر**
+   باشد. این یک محدودیت سخت است، نه یک پیشنهاد — اگر رعایت نشود، پست اصلاً ارسال نمی‌شود.
    - یک عنوان کوتاه، جذاب و کنجکاوی‌برانگیز بساز (بدون گیومه و بدون هشتگ).
-   - بلافاصله بعد از عنوان، با یک «هوک» قوی شروع کن: یک سؤال چالش‌برانگیز، یک آمار/ادعای
-     غافلگیرکننده، یا یک تنش/تضاد از دل خود اپیزود — چیزی که در همان یکی-دو جمله‌ی اول
-     خواننده را متوقف کند و کنجکاوش کند که ادامه را بخواند.
-   - در ادامه، به‌جای فهرست خشک نکات، از تکنیک‌های قصه‌گویی و کپی‌رایتینگ استفاده کن: ایجاد
-     «شکاف کنجکاوی» (curiosity gap)، ساختن تعلیق قبل از افشای نکته‌ی کلیدی، تضادها و
-     غافلگیری‌های خود بحث را برجسته کن، و از زبان صمیمی و پرانرژی (نه رسمی و اداری) استفاده کن.
-   - در ۴ تا ۸ پاراگراف کوتاه مهم‌ترین نکات، بحث‌ها و ایده‌های اپیزود را پوشش بده، طوری که
-     خواننده تا انتها درگیر بماند.
-   - در پایان، در صورت مناسب بودن، با یک جمله‌ی تأمل‌برانگیز یا سؤالی برای فکرکردن مخاطب
-     تمام کن (نه یک جمع‌بندی خشک اداری).
+   - بلافاصله بعد از عنوان، با یک «هوک» قوی و کوتاه شروع کن: یک سؤال چالش‌برانگیز، یک آمار/ادعای
+     غافلگیرکننده، یا یک تنش/تضاد از دل خود اپیزود.
+   - فقط در ۲ پاراگراف بسیار کوتاه (هرکدام ۲ تا ۳ جمله)، مهم‌ترین و جذاب‌ترین نکته‌ی اپیزود را
+     با لحن صمیمی و پرانرژی (نه رسمی و اداری) بیان کن؛ روی یک ایده‌ی اصلی تمرکز کن، نه فهرست
+     همه‌ی نکات.
+   - در صورت جا بودن، با یک جمله‌ی کوتاه تأمل‌برانگیز یا سؤالی تمام کن.
+   - اگر مجبور شدی چیزی را حذف کنی تا در محدودیت کاراکتر بگنجد، جزئیات را حذف کن، نه هوک یا
+     عنوان را.
 
 ۳. خروجی باید ۱۰۰٪ فارسی باشد؛ هیچ کلمه یا کاراکتری از هیچ زبان دیگری — نه چینی، نه روسی، نه
    آلمانی، نه ترکی، نه هیچ زبان دیگر — نباید در متن ظاهر شود. تنها استثنا همان نام‌های خاص
@@ -126,7 +134,7 @@ def _generate_once(client: Groq, model: str, user_prompt: str, temperature: floa
             {"role": "user", "content": user_prompt},
         ],
         temperature=temperature,
-        max_tokens=1500,
+        max_tokens=400,
         **extra_kwargs,
     )
     content = completion.choices[0].message.content.strip()
@@ -154,7 +162,7 @@ def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key:
     for attempt in range(1, GENERATION_ATTEMPTS + 1):
         html = _generate_once(client, model, user_prompt, temperature=0.4)
         if not _FOREIGN_SCRIPT_RE.search(html):
-            return _sanitize_html(html)
+            return _finalize(html)
         logger.warning(
             "LLM output contained stray non-Persian script characters (attempt %d/%d); regenerating",
             attempt, GENERATION_ATTEMPTS,
@@ -169,7 +177,51 @@ def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key:
 
     logger.warning("Stray non-Persian characters persisted after %d attempts; stripping them", GENERATION_ATTEMPTS)
     html = _FOREIGN_SCRIPT_RE.sub(" ", html)
-    return _sanitize_html(_collapse_whitespace(html))
+    return _finalize(_collapse_whitespace(html))
+
+
+def _finalize(html: str) -> str:
+    return _fit_to_caption_limit(_sanitize_html(html))
+
+
+def _fit_to_caption_limit(html: str) -> str:
+    """Trim on a clean boundary if the model ignored the ~800-char instruction,
+    so the post still fits as a single photo caption (Telegram's hard 1024-char
+    caption limit) instead of failing to send."""
+    limit = TELEGRAM_CAPTION_MAX_LEN - _CAPTION_SAFETY_MARGIN
+    if len(html) <= limit:
+        return html
+
+    logger.warning("Summary is %d chars, over the %d-char caption budget; trimming", len(html), limit)
+    window = html[:limit]
+    cut_at = window.rfind("\n\n")
+    if cut_at == -1 or cut_at < limit * 0.4:
+        cut_at = -1
+        for punct in (".", "؟", "!", "،", "؛"):
+            idx = window.rfind(punct)
+            if idx > cut_at:
+                cut_at = idx + 1
+    if cut_at == -1 or cut_at < limit * 0.4:
+        cut_at = limit
+
+    return _close_open_tags(html[:cut_at].rstrip())
+
+
+def _close_open_tags(html: str) -> str:
+    """Append closing tags for any allowed tag left open after truncation."""
+    open_tags = []
+    for is_closing, tag in re.findall(r"<(/?)([a-zA-Z]+)>", html):
+        tag = tag.lower()
+        if tag not in _ALLOWED_TAGS:
+            continue
+        if is_closing:
+            if open_tags and open_tags[-1] == tag:
+                open_tags.pop()
+        else:
+            open_tags.append(tag)
+    for tag in reversed(open_tags):
+        html += f"</{tag}>"
+    return html
 
 
 def _foreign_script_ratio(text: str) -> float:

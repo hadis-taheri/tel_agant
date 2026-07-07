@@ -76,14 +76,36 @@ async def send_summary_async(
     summary_html: str,
     photo_bytes: Optional[bytes] = None,
 ) -> Optional[int]:
-    """Post the summary. `photo_bytes`, if given, should be an episode-specific
-    topic image (see image_generator.py); otherwise a generic local banner is
-    used so there's always some image rather than a bare wall of text."""
-    bot = Bot(token=bot_token)
-    chunks = _split_message(summary_html)
+    """Post the summary as a single message: photo with the whole summary as
+    its caption. `photo_bytes`, if given, should be an episode-specific topic
+    image (see image_generator.py); otherwise a generic local banner is used
+    so there's always some image rather than a bare wall of text.
 
-    first_message_id = None
+    summarizer.py already keeps summaries within the caption limit, but if
+    something ever produces a longer one anyway, this falls back to a
+    photo+title followed by the rest as separate messages rather than
+    failing to send outright.
+    """
+    bot = Bot(token=bot_token)
     photo_bytes = photo_bytes or _pick_banner_image_bytes()
+
+    if photo_bytes and len(summary_html) <= TELEGRAM_CAPTION_MAX_LEN:
+        return await _send_with_retry(
+            lambda: bot.send_photo(
+                chat_id=channel_id,
+                photo=photo_bytes,
+                caption=summary_html,
+                parse_mode=ParseMode.HTML,
+            )
+        )
+
+    logger.warning(
+        "Summary is %d chars, over the %d-char caption limit; falling back to photo+title "
+        "followed by separate text message(s)", len(summary_html), TELEGRAM_CAPTION_MAX_LEN,
+    )
+    chunks = _split_message(summary_html)
+    first_message_id = None
+    remaining_chunks = chunks
 
     if photo_bytes:
         title_chunk, *rest = chunks
@@ -99,8 +121,6 @@ async def send_summary_async(
         )
         # If the title alone didn't fit as a caption, send it as the first text chunk.
         remaining_chunks = rest if caption else chunks
-    else:
-        remaining_chunks = chunks
 
     for chunk in remaining_chunks:
         message_id = await _send_with_retry(

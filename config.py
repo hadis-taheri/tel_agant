@@ -42,7 +42,7 @@ def load_settings() -> Settings:
         supabase_key=_require("SUPABASE_KEY"),
         groq_api_key=_require("GROQ_API_KEY"),
         groq_stt_model=os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo"),
-        groq_llm_model=os.getenv("GROQ_LLM_MODEL", "llama-3.3-70b-versatile"),
+        groq_llm_model=os.getenv("GROQ_LLM_MODEL", "qwen/qwen3.6-27b"),
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         telegram_channel_id=_require("TELEGRAM_CHANNEL_ID"),
         crossingpodcast_api=os.getenv(

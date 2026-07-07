@@ -98,6 +98,19 @@ def _truncate(transcript: str) -> str:
     return truncated + "\n...[transcript truncated]"
 
 
+# Qwen3 models ("hybrid" reasoning models) default to an extremely verbose
+# "thinking" mode that can burn through max_tokens before ever producing the
+# actual answer, wrapped in a <think>...</think> block we don't want to show
+# users. Passing reasoning_effort="none" disables that (confirmed empirically
+# against Groq's Qwen3 models); passing it to a non-reasoning model like the
+# Llama models is a hard 400 error, so it's only included for models that need it.
+_REASONING_MODEL_PREFIXES = ("qwen/",)
+
+
+def _is_reasoning_model(model: str) -> bool:
+    return model.startswith(_REASONING_MODEL_PREFIXES)
+
+
 @retry(
     reraise=True,
     stop=stop_after_attempt(4),
@@ -105,6 +118,7 @@ def _truncate(transcript: str) -> str:
     retry=retry_if_exception_type((APIStatusError,)),
 )
 def _generate_once(client: Groq, model: str, user_prompt: str, temperature: float) -> str:
+    extra_kwargs = {"reasoning_effort": "none"} if _is_reasoning_model(model) else {}
     completion = client.chat.completions.create(
         model=model,
         messages=[
@@ -113,8 +127,13 @@ def _generate_once(client: Groq, model: str, user_prompt: str, temperature: floa
         ],
         temperature=temperature,
         max_tokens=1500,
+        **extra_kwargs,
     )
-    return completion.choices[0].message.content.strip()
+    content = completion.choices[0].message.content.strip()
+    # Defense in depth: even with reasoning disabled, strip a stray <think> block
+    # (including its content) if one ever slips through, rather than leaking
+    # the model's internal reasoning into a Telegram post.
+    return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
 
 
 def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key: str, model: str) -> str:

@@ -108,12 +108,42 @@ class EpisodeStore:
         resp = self.client.table(TABLE).insert(row).execute()
         return resp.data[0]["id"]
 
-    def get_oldest_pending(self) -> Optional[dict]:
+    def get_last_finalized_source(self) -> Optional[str]:
+        """Return the source of the most recently posted/processed episode, or
+        None if none exist yet. Used to alternate sources between backlog runs."""
+        resp = (
+            self.client.table(TABLE)
+            .select("source")
+            .in_("status", [STATUS_POSTED, STATUS_PROCESSED])
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return resp.data[0]["source"] if resp.data else None
+
+    def get_oldest_pending(self, exclude_source: Optional[str] = None) -> Optional[dict]:
         """Return the oldest (by published date) episode still queued as 'pending', or None.
 
         Used by backlog processing (phase 2) to work through the historical
-        archive one episode at a time, oldest first.
+        archive one episode at a time, oldest first. If `exclude_source` is
+        given, prefer an episode from a *different* source first (so backlog
+        posts alternate between sources run to run); falls back to any
+        pending episode if none from another source is queued, so the
+        backlog never stalls just because one source ran dry.
         """
+        if exclude_source:
+            resp = (
+                self.client.table(TABLE)
+                .select("*")
+                .eq("status", STATUS_PENDING)
+                .neq("source", exclude_source)
+                .order("published_at", desc=False, nullsfirst=False)
+                .limit(1)
+                .execute()
+            )
+            if resp.data:
+                return resp.data[0]
+
         resp = (
             self.client.table(TABLE)
             .select("*")

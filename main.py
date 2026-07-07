@@ -188,11 +188,18 @@ def scrape_backlog(settings: Settings) -> int:
 def process_backlog_once(settings: Settings) -> bool:
     """Phase 2: ensure the backlog is populated, then process exactly one
     oldest-pending episode, marking it 'processed'. Returns True if an
-    episode was processed, False if the backlog is empty."""
+    episode was processed, False if the backlog is empty.
+
+    Alternates sources run to run: picks the oldest pending episode from a
+    source different than whichever source was posted/processed last, so
+    consecutive backlog runs alternate crossingpodcast/sv101 instead of
+    draining one source's entire archive before touching the other.
+    """
     store = EpisodeStore(settings.supabase_url, settings.supabase_key)
     scrape_backlog(settings)
 
-    row = store.get_oldest_pending()
+    last_source = store.get_last_finalized_source()
+    row = store.get_oldest_pending(exclude_source=last_source)
     if not row:
         logger.info("Backlog is empty: no pending archive episodes to process.")
         return False

@@ -59,7 +59,12 @@ meaning "explicitly skipped, never process". The only branch is the final status
   archive, queues anything not-yet-known as `pending`, then processes exactly **one**
   oldest-`pending` row per invocation. This is deliberate throttling — it's how hundreds of old
   episodes get processed one-at-a-time (e.g. once/hour via the GitHub Actions schedule) instead of
-  all at once on first run.
+  all at once on first run. `EpisodeStore.get_oldest_pending(exclude_source=...)` alternates which
+  source that one episode comes from: `process_backlog_once` looks up the source of the
+  most-recently-finalized episode (`get_last_finalized_source`) and prefers the *other* source's
+  oldest pending row, falling back to any pending row if that source's backlog is empty. This
+  means consecutive hourly runs alternate crossingpodcast/sv101 instead of draining one source's
+  entire archive before ever touching the other.
 - `daily_cycle()` just runs phase 1 then phase 2; `--loop` repeats `daily_cycle` on a timer.
   `main.py`'s own `_run_pipeline()` is the only place that actually calls transcriber/summarizer/
   telegram_bot — phase 1 and phase 2 both funnel through it with a different `final_status`.

@@ -1,13 +1,19 @@
 name: Hourly podcast digest
 
-# Runs every hour, offset from the top of the hour. GitHub's own docs warn
-# that schedule triggers queued for exactly :00 (the busiest minute across
-# all of GitHub Actions) can be delayed or dropped under load -- confirmed
-# in practice here: only 2 of the ~10 expected hourly runs between 11:21 and
-# 21:20 UTC on 2026-07-07 actually fired. Minute 7 avoids that peak.
+# GitHub's `schedule` trigger has turned out to be unreliable for this repo
+# well beyond the documented "avoid :00" congestion advice: even after
+# moving off the top of the hour to :07, the very next scheduled run still
+# didn't fire (checked directly against the Actions API -- 40+ minutes
+# overdue with nothing queued). GitHub schedule triggers are explicitly
+# "best effort" with no SLA and can simply be dropped. Mitigation: fire 4
+# times an hour instead of once, all offset from the common :00/:15/:30/:45
+# marks, so a single dropped tick doesn't mean an hour with no run at all.
+# main.py's own logic (dedup by source+external_id, one backlog episode per
+# invocation) makes extra runs harmless if more than one lands in the same
+# hour -- it just makes the backlog advance a bit faster, not double-post.
 on:
   schedule:
-    - cron: "7 * * * *"
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch: {} # allows manually triggering a run from the Actions tab
 
 jobs:

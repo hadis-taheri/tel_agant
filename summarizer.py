@@ -309,7 +309,27 @@ def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key:
 
 
 def _finalize(html: str) -> str:
-    return _fit_to_text_limit(_sanitize_html(html))
+    return _force_rtl_paragraphs(_fit_to_text_limit(_sanitize_html(html)))
+
+
+# Unicode RIGHT-TO-LEFT MARK: a zero-width character with strong RTL
+# directionality. Telegram (like most renderers) picks each paragraph's base
+# text direction from its first *strong-directional* character; an HTML tag
+# has none, so a paragraph that happens to start with an English proper noun
+# (very common here -- "Tesla ...", "OpenAI ...") gets misdetected as an
+# LTR paragraph even though the rest of it is Persian. That shows up as
+# misaligned/reversed-looking text with odd leading gaps once rendered.
+# Prefixing every paragraph with this mark forces RTL regardless of what
+# character comes right after it, without changing anything visible.
+# Written as an escape (not a literal character) since this project has
+# already been burned once by an invisible bidi character silently
+# corrupting a copy-pasted value -- keep this one explicit and greppable.
+_RLM = "\u200f"
+
+
+def _force_rtl_paragraphs(html: str) -> str:
+    paragraphs = html.split("\n\n")
+    return "\n\n".join(p if not p or p.startswith(_RLM) else _RLM + p for p in paragraphs)
 
 
 def _fit_to_text_limit(html: str) -> str:

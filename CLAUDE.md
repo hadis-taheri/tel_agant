@@ -87,6 +87,17 @@ reasoning model family, extend `_REASONING_MODEL_PREFIXES` accordingly. Also not
 project's usual ~12,000) and fails on transcripts at the current `MAX_TRANSCRIPT_BYTES` — it was
 tested and rejected for that reason, not a typo.
 
+**Proper-noun handling is imperfect even with an explicit rule**: the prompt's rule 1 lists concrete
+wrong/right pairs (e.g. "تسلا/تلسا اشتباه، Tesla درست است") rather than just naming allowed English
+terms, because a real incident showed the model transliterating company names (Tesla -> تسلا/تلسا,
+inconsistently even spelled wrong) and mangling place names it didn't recognize as protected
+(Wall Street -> nonsense like "دیووال استراک") when the examples list only covered AI-specific
+tools. Broadening the rule to "any proper noun: companies, products, people, well-known
+financial/tech place names" plus lowering `temperature` (0.4 -> 0.3) reduced but did not eliminate
+this -- expect occasional exceptions (e.g. "سیلیکون‌ولی" instead of "Silicon Valley") on new
+transcripts; this is LLM variance, not a regression, unless it starts producing garbled non-words
+again as it did before the fix.
+
 **summarizer.py reliability note**: the LLM occasionally leaks stray non-Persian-script characters
 (Chinese/Cyrillic/Hangul/Kana) into otherwise-Persian output, more often than plain temperature
 tuning alone fixes. `summarize_to_persian_html` regenerates up to
@@ -118,14 +129,15 @@ section) — there's no code path that does this automatically.
 
 **Telegram delivery is one message per episode, by design**: the whole post (title + body) is sent
 as a single `send_photo` call with the summary as the caption, not photo-then-text. This is why
-`summarizer.py`'s prompt caps the summary at ~800 chars (2 short paragraphs) — Telegram hard-limits
-photo captions to 1024 characters, so the summary has to be short enough to fit *with* the image in
-one message, not just short enough for a text message (4096-char limit, much roomier). If the LLM
-ignores that budget anyway, `summarizer._fit_to_caption_limit()` trims on a clean boundary
-(paragraph break or sentence-ending punctuation) and re-closes any HTML tag left open by the cut,
-and `telegram_bot.py` has one more fallback layer beyond that (photo+title, then the rest as
-separate text messages) so a send never just fails outright. Don't casually raise the ~800-char
-prompt target without re-checking this whole chain still fits under 1024 in practice.
+`summarizer.py`'s prompt targets ~900-950 chars (3-4 paragraphs, using most of the budget rather
+than a minimal summary — this is meant to read like a podcast digest, not a news blurb) — Telegram
+hard-limits photo captions to 1024 characters, so the summary has to be short enough to fit *with*
+the image in one message, not just short enough for a text message (4096-char limit, much roomier).
+If the LLM ignores that budget anyway, `summarizer._fit_to_caption_limit()` trims on a clean
+boundary (paragraph break or sentence-ending punctuation) and re-closes any HTML tag left open by
+the cut, and `telegram_bot.py` has one more fallback layer beyond that (photo+title, then the rest
+as separate text messages) so a send never just fails outright. Don't casually raise the
+~900-950-char prompt target without re-checking this whole chain still fits under 1024 in practice.
 
 There's deliberately no link back to the source episode in the post: Telegram auto-previews any URL
 in a message, and the source pages (crossingpodcast.com, fireside.fm) are Chinese, so a source link

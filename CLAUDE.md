@@ -30,10 +30,11 @@ real Supabase/Groq/Telegram accounts — there is no mock/test mode.
 ## Architecture
 
 Pipeline: `scraper.py` (find episodes) -> `transcriber.py` (audio -> text via Groq Whisper) ->
-`summarizer.py` (text -> long-form Persian HTML via Groq LLM) -> `telegram_bot.py` (post to channel
-as plain text, no photo), all coordinated by `main.py`, with `database.py` (Supabase) as the single
-source of truth for what has and hasn't been processed. `config.py` loads all settings from `.env`
-and raises immediately if a required var is missing — there's no partial/degraded startup.
+`summarizer.py` (text -> long-form Persian HTML via Groq LLM, itself a two-step pivot through
+English — see below) -> `telegram_bot.py` (post to channel as plain text, no photo), all
+coordinated by `main.py`, with `database.py` (Supabase) as the single source of truth for what has
+and hasn't been processed. `config.py` loads all settings from `.env` and raises immediately if a
+required var is missing — there's no partial/degraded startup.
 
 `image_generator.py` (topic-image generation via a Groq-written prompt + Pollinations.ai) still
 exists in the repo but is **not called** by `main.py` — posts are text-only by design (see the
@@ -58,8 +59,9 @@ meaning "explicitly skipped, never process". The only branch is the final status
 - Phase 2 (`scrape_backlog` + `process_backlog_once`): walks each source's *entire* historical
   archive, queues anything not-yet-known as `pending`, then processes exactly **one**
   oldest-`pending` row per invocation. This is deliberate throttling — it's how hundreds of old
-  episodes get processed one-at-a-time (e.g. once/hour via the GitHub Actions schedule) instead of
-  all at once on first run. `EpisodeStore.get_oldest_pending(exclude_source=...)` alternates which
+  episodes get processed one-at-a-time (roughly hourly via the GitHub Actions schedule, though see
+  the scheduling note below) instead of all at once on first run.
+  `EpisodeStore.get_oldest_pending(exclude_source=...)` alternates which
   source that one episode comes from: `process_backlog_once` looks up the source of the
   most-recently-finalized episode (`get_last_finalized_source`) and prefers the *other* source's
   oldest pending row, falling back to any pending row if that source's backlog is empty. This
@@ -106,30 +108,51 @@ this -- expect occasional exceptions (e.g. "سیلیکون‌ولی" instead of 
 transcripts; this is LLM variance, not a regression, unless it starts producing garbled non-words
 again as it did before the fix.
 
-**summarizer.py reliability note**: the LLM occasionally leaks stray non-Persian-script characters
-(Chinese/Cyrillic/Hangul/Kana) into otherwise-Persian output, more often than plain temperature
-tuning alone fixes. `summarize_to_persian_html` regenerates up to
-`GENERATION_ATTEMPTS` times when `_FOREIGN_SCRIPT_RE` matches. Two different outcomes after that,
-based on `_foreign_script_ratio()`: below `_MAX_FOREIGN_SCRIPT_RATIO` (~15%) it strips the foreign
-runs and ships the result (minor stray leakage, still readable); above it, it **raises** instead of
-stripping. This split exists because of a real incident: on one episode the model didn't leak a few
-stray characters, it answered ~90% in Chinese outright, and stripping "foreign" characters left
-behind only numbers/punctuation/English company names — a near-empty, meaningless message that
-still got posted to the live channel before this fix. Don't remove either half of this behavior
-without re-testing against real (not just English) transcripts. The prompt also has an explicit,
-deliberate rule: tool/model/company names (OpenAI, Claude Code, Anthropic, etc.) must stay in
-English/Latin script, never transliterated.
+**summarizer.py translates via a two-step English pivot, not Chinese -> Persian directly**:
+`summarize_to_persian_html` first calls `_translate_to_english()` to turn the raw transcript
+(English or Chinese) into a detailed English summary, then rewrites *that* into the final Persian
+post. This exists because direct Chinese -> long-form Persian proved unreliable specifically for
+crossingpodcast: its transcripts are dense, almost entirely Chinese conversation (unlike sv101,
+which reads as more English-anchored already), and two different crossingpodcast backlog episodes
+came back 72-74% non-Persian after all 3 retries at the ~3400-3700-char target before this fix —
+both succeeded on the first attempt afterward. Chinese -> English is a far more common/reliable
+task for this model than Chinese -> Persian directly; English -> Persian was already the reliable
+half of this pipeline. Applies uniformly to both sources (not just crossingpodcast) to keep the
+pipeline logic simple — it doesn't hurt sv101's already-good results.
+
+Each step has its own foreign-script leak check, since each targets a different output language:
+`_translate_to_english` retries (`BRIDGE_GENERATION_ATTEMPTS`) if too much non-ASCII leaks into
+what should be all-English (`_NON_ASCII_RE`, `_MAX_NON_ASCII_RATIO`), and **raises** if that
+persists — a broken bridge summary means the Persian step has nothing reliable to work from. The
+Persian step keeps its original check: the LLM occasionally leaks stray non-Persian-script
+characters (Chinese/Cyrillic/Hangul/Kana) into otherwise-Persian output; `summarize_to_persian_html`
+regenerates up to `GENERATION_ATTEMPTS` times when `_FOREIGN_SCRIPT_RE` matches, and below
+`_MAX_FOREIGN_SCRIPT_RATIO` (~15%) strips the foreign runs and ships the result, but above it
+**raises** instead of stripping. That split exists because of a real incident: on one episode the
+model didn't leak a few stray characters, it answered ~90% in Chinese outright, and stripping
+"foreign" characters left behind only numbers/punctuation/English company names — a near-empty,
+meaningless message that still got posted to the live channel before that fix. Don't remove either
+half of either check without re-testing against real (not just English) transcripts. The prompt
+also has an explicit, deliberate rule: tool/model/company names (OpenAI, Claude Code, Anthropic,
+etc.) must stay in English/Latin script, never transliterated.
 
 **Transcript truncation is byte-based, not char-based, on purpose**: `MAX_TRANSCRIPT_BYTES` in
-`summarizer.py` truncates by UTF-8 byte length before the request goes to Groq. This was a real
-production bug, not a style choice — a character-count cap sized for English silently let Chinese
-transcripts (≈3 bytes/char, and denser tokenization than English) through at 2-3x the intended
-request size, which passed local testing (English-only) but hit Groq's tokens-per-minute limit for
-this model (measured at 8,000 TPM, not the ~12,000 assumed earlier) with a `413 Request too large`
-error on a real Chinese sv101 episode in production. 25,000 bytes was re-verified directly against
-a live request to cost ~5,700 prompt tokens; combined with the long-form completion budget (up to
-2,000 tokens, see `_generate_once`), a full request runs ~7,900 total tokens — close to the 8,000
-ceiling, so re-verify against the actual account limit before raising either number.
+`summarizer.py` truncates by UTF-8 byte length before the request goes to Groq (only the bridge
+step, `_translate_to_english`, ever sees the raw transcript — see the two-step-pivot note above).
+This was a real production bug, not a style choice — a character-count cap sized for English
+silently let Chinese transcripts (≈3 bytes/char, and denser tokenization than English) through at
+2-3x the intended request size, which passed local testing (English-only) but hit Groq's
+tokens-per-minute limit for this model (measured at 8,000 TPM, not the ~12,000 assumed earlier)
+with a `413 Request too large` error on a real Chinese sv101 episode in production. 25,000 bytes
+was re-verified directly against a live request to cost ~5,700 prompt tokens; combined with the
+bridge step's own completion budget (1,500 tokens), that first call runs ~7,000-7,200 total tokens
+— close to the 8,000 ceiling on its own. The second (Persian) call is much cheaper since its input
+is the compact English bridge summary rather than the raw transcript, but the two calls landing in
+the same 60-second window can still push the *combined* total over 8,000 and trigger a 429 —
+`_generate_once`'s existing `@retry` with exponential backoff absorbs this automatically (confirmed
+in practice), just adding some latency per episode rather than failing it. Re-verify the per-call
+math against the actual account limit before raising `MAX_TRANSCRIPT_BYTES` or either step's
+`max_tokens`.
 
 **Failed episodes aren't automatically retried**: `EpisodeStore.is_known()` only checks
 `(source, external_id)` existence, not status — a row with `status='failed'` is still "known" and
@@ -162,8 +185,20 @@ falls back to a banner. Posts are text-only until/unless that's revisited.
 
 Supabase (Postgres), Groq (STT + LLM), and a Telegram bot/channel are real, already-provisioned
 accounts (not swappable test doubles) — see README.md for the current project's specific setup
-steps and the GitHub Actions hourly schedule (`.github/workflows/daily-post.yml`, secrets documented
-there) that runs `python main.py` once every hour.
+steps and the GitHub Actions schedule (`.github/workflows/daily-post.yml`, secrets documented
+there) that runs `python main.py`.
+
+**GitHub's `schedule` trigger is not reliable enough to fire once/hour for this repo**: confirmed
+directly against the Actions API on 2026-07-07 — only 2 of ~10 expected hourly runs fired over a
+10-hour window, and even after moving off the top-of-hour minute (GitHub's documented congestion
+advice), the very next scheduled run still didn't fire at all. GitHub's schedule event has no SLA
+and can simply be dropped, independent of which minute it's queued for. The cron now fires 4x/hour
+(`7,22,37,52 * * * *`) so a single dropped tick doesn't cost a whole hour; this is safe because
+`main.py` is idempotent (dedup by `(source, external_id)`, at most one backlog episode processed
+per invocation) — extra runs landing in the same hour just advance the backlog faster, they don't
+double-post. If posts stop appearing again, check the Actions run list
+(`https://api.github.com/repos/<owner>/<repo>/actions/workflows/daily-post.yml/runs`) before
+assuming the pipeline code itself is broken.
 
 **GitHub Actions secret gotcha**: if a secret value (e.g. `SUPABASE_KEY`) is copy-pasted from a
 terminal/chat UI that renders mixed RTL (Persian) and LTR (English/token) text, invisible Unicode

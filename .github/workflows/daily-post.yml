@@ -1,11 +1,9 @@
-name: Daily podcast digest
+name: Hourly podcast digest
 
-# Runs every day at 12:00 (noon) Iran Standard Time.
-# Iran has used a fixed UTC+3:30 offset (no DST) since 1401 (2022), so that's
-# a constant 08:30 UTC year-round.
+# Runs at the top of every hour.
 on:
   schedule:
-    - cron: "30 8 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch: {} # allows manually triggering a run from the Actions tab
 
 jobs:

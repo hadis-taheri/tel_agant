@@ -30,14 +30,16 @@ real Supabase/Groq/Telegram accounts — there is no mock/test mode.
 ## Architecture
 
 Pipeline: `scraper.py` (find episodes) -> `transcriber.py` (audio -> text via Groq Whisper) ->
-`summarizer.py` (text -> Persian HTML via Groq LLM) -> `image_generator.py` (Persian summary ->
-English image prompt via the same Groq LLM -> episode-topic image via Pollinations.ai) ->
-`telegram_bot.py` (post to channel), all coordinated by `main.py`, with `database.py` (Supabase) as
-the single source of truth for what has and hasn't been processed. `config.py` loads all settings
-from `.env` and raises immediately if a required var is missing — there's no partial/degraded
-startup. `image_generator.py` failures are the one exception to that fail-fast posture:
-`_run_pipeline` in main.py deliberately catches and swallows them (falls back to a generic banner)
-rather than failing the whole episode over a non-essential image.
+`summarizer.py` (text -> long-form Persian HTML via Groq LLM) -> `telegram_bot.py` (post to channel
+as plain text, no photo), all coordinated by `main.py`, with `database.py` (Supabase) as the single
+source of truth for what has and hasn't been processed. `config.py` loads all settings from `.env`
+and raises immediately if a required var is missing — there's no partial/degraded startup.
+
+`image_generator.py` (topic-image generation via a Groq-written prompt + Pollinations.ai) still
+exists in the repo but is **not called** by `main.py` — posts are text-only by design (see the
+Telegram delivery note below). It's dead code kept around in case image posts are re-enabled later;
+same for `telegram_bot.py`'s former banner-fallback assets under `assets/topic_banner_*.jpg` and
+`gen_banners.py`.
 
 **Episode identity and dedup**: every episode is keyed by `(source, external_id)`, unique in the
 `episodes` table. `external_id` is the crossingpodcast slug or the sv101 RSS GUID.
@@ -56,7 +58,7 @@ meaning "explicitly skipped, never process". The only branch is the final status
 - Phase 2 (`scrape_backlog` + `process_backlog_once`): walks each source's *entire* historical
   archive, queues anything not-yet-known as `pending`, then processes exactly **one**
   oldest-`pending` row per invocation. This is deliberate throttling — it's how hundreds of old
-  episodes get processed one-at-a-time (e.g. once/day via the GitHub Actions schedule) instead of
+  episodes get processed one-at-a-time (e.g. once/hour via the GitHub Actions schedule) instead of
   all at once on first run.
 - `daily_cycle()` just runs phase 1 then phase 2; `--loop` repeats `daily_cycle` on a timer.
   `main.py`'s own `_run_pipeline()` is the only place that actually calls transcriber/summarizer/
@@ -84,8 +86,9 @@ models that default to an extremely verbose `<think>...</think>` preamble that c
 model-name check rather than passing it unconditionally). If you change `GROQ_LLM_MODEL` to another
 reasoning model family, extend `_REASONING_MODEL_PREFIXES` accordingly. Also note `qwen/qwen3-32b`
 (the other Qwen model on this Groq account) has a much lower per-model TPM limit (6,000 vs. this
-project's usual ~12,000) and fails on transcripts at the current `MAX_TRANSCRIPT_BYTES` — it was
-tested and rejected for that reason, not a typo.
+project's usual ~8,000 for `qwen/qwen3.6-27b`, measured directly against a live request — see
+`MAX_TRANSCRIPT_BYTES` in summarizer.py) and fails on transcripts at the current
+`MAX_TRANSCRIPT_BYTES` — it was tested and rejected for that reason, not a typo.
 
 **Proper-noun handling is imperfect even with an explicit rule**: the prompt's rule 1 lists concrete
 wrong/right pairs (e.g. "تسلا/تلسا اشتباه، Tesla درست است") rather than just naming allowed English
@@ -116,10 +119,12 @@ English/Latin script, never transliterated.
 `summarizer.py` truncates by UTF-8 byte length before the request goes to Groq. This was a real
 production bug, not a style choice — a character-count cap sized for English silently let Chinese
 transcripts (≈3 bytes/char, and denser tokenization than English) through at 2-3x the intended
-request size, which passed local testing (English-only) but hit Groq's free-tier tokens-per-minute
-limit (12,000 TPM) with a `413 Request too large` error on a real Chinese sv101 episode in
-production. 25,000 bytes was empirically verified safe (~7,800 total tokens) against that limit —
-re-verify against the actual account limit before raising it.
+request size, which passed local testing (English-only) but hit Groq's tokens-per-minute limit for
+this model (measured at 8,000 TPM, not the ~12,000 assumed earlier) with a `413 Request too large`
+error on a real Chinese sv101 episode in production. 25,000 bytes was re-verified directly against
+a live request to cost ~5,700 prompt tokens; combined with the long-form completion budget (up to
+2,000 tokens, see `_generate_once`), a full request runs ~7,900 total tokens — close to the 8,000
+ceiling, so re-verify against the actual account limit before raising either number.
 
 **Failed episodes aren't automatically retried**: `EpisodeStore.is_known()` only checks
 `(source, external_id)` existence, not status — a row with `status='failed'` is still "known" and
@@ -127,32 +132,33 @@ will never be picked up again by `run_once`/`process_backlog_once` on its own. T
 either delete its row or manually reset its `status` back to `pending` (see README's "نکات مهم"
 section) — there's no code path that does this automatically.
 
-**Telegram delivery is one message per episode, by design**: the whole post (title + body) is sent
-as a single `send_photo` call with the summary as the caption, not photo-then-text. This is why
-`summarizer.py`'s prompt targets ~900-950 chars (3-4 paragraphs, using most of the budget rather
-than a minimal summary — this is meant to read like a podcast digest, not a news blurb) — Telegram
-hard-limits photo captions to 1024 characters, so the summary has to be short enough to fit *with*
-the image in one message, not just short enough for a text message (4096-char limit, much roomier).
-If the LLM ignores that budget anyway, `summarizer._fit_to_caption_limit()` trims on a clean
-boundary (paragraph break or sentence-ending punctuation) and re-closes any HTML tag left open by
-the cut, and `telegram_bot.py` has one more fallback layer beyond that (photo+title, then the rest
-as separate text messages) so a send never just fails outright. Don't casually raise the
-~900-950-char prompt target without re-checking this whole chain still fits under 1024 in practice.
+**Telegram delivery is plain text, by design (no photo)**: `telegram_bot.send_summary()` posts the
+whole summary via `send_message`, not `send_photo`. This is why `summarizer.py`'s prompt targets
+~3400-3700 chars across 6-9 paragraphs, deliberately written to be interactive (questions and
+"تصور کن..." breaks scattered through the body, not just a hook-and-close) — Telegram's plain-text
+message limit is 4096 characters, much roomier than the 1024-char photo-caption limit this project
+used to target, so the summary can read like a full podcast digest rather than a short blurb. If the
+LLM overshoots that budget anyway, `summarizer._fit_to_text_limit()` trims on a clean boundary
+(paragraph break or sentence-ending punctuation) and re-closes any HTML tag left open by the cut;
+`telegram_bot._split_message()` is a further fallback that splits into multiple messages on
+paragraph breaks if a summary somehow still exceeds 4096 chars. Don't raise the ~3400-3700-char
+prompt target without re-checking the token math in the `MAX_TRANSCRIPT_BYTES` comment above still
+holds (raising the completion length eats into the same per-minute token budget as the transcript).
 
 There's deliberately no link back to the source episode in the post: Telegram auto-previews any URL
 in a message, and the source pages (crossingpodcast.com, fireside.fm) are Chinese, so a source link
-pulled in a Chinese title/description/cover image via the auto-preview. The photo is either an
-episode-specific image (`image_generator.py`) or, if that fails, a generic banner from
-`assets/topic_banner_*.jpg` (static images generated once via `gen_banners.py`, not a live API
-call, so there's nothing external to rate-limit or go down for the fallback path). Re-run
-`gen_banners.py` to regenerate/vary that fallback set.
+pulled in a Chinese title/description/cover image via the auto-preview. Image generation
+(`image_generator.py`, Pollinations.ai) and the local banner fallback (`assets/topic_banner_*.jpg`,
+`gen_banners.py`) were built for an earlier version of this pipeline that posted photo+caption, but
+are currently unused — `main.py` no longer calls `image_generator`, and `telegram_bot.py` no longer
+falls back to a banner. Posts are text-only until/unless that's revisited.
 
 ## External accounts this project depends on
 
 Supabase (Postgres), Groq (STT + LLM), and a Telegram bot/channel are real, already-provisioned
 accounts (not swappable test doubles) — see README.md for the current project's specific setup
-steps and the GitHub Actions daily schedule (`.github/workflows/daily-post.yml`, secrets documented
-there) that runs `python main.py` once a day at noon Iran time.
+steps and the GitHub Actions hourly schedule (`.github/workflows/daily-post.yml`, secrets documented
+there) that runs `python main.py` once every hour.
 
 **GitHub Actions secret gotcha**: if a secret value (e.g. `SUPABASE_KEY`) is copy-pasted from a
 terminal/chat UI that renders mixed RTL (Persian) and LTR (English/token) text, invisible Unicode

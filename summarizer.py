@@ -9,15 +9,22 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 logger = logging.getLogger(__name__)
 
-# Keep well under Groq's free-tier tokens-per-minute limit (12,000 TPM as of
-# writing). This is a BYTE budget, not a character count, and it's tuned for
-# the worst case: Chinese text runs roughly 3 bytes/char in UTF-8 *and*
-# tokenizes far more densely than English (~0.3 tokens/byte vs ~0.25
-# tokens/char for English), so a naive character-count cap sized for English
-# silently produced requests 2-3x the size expected on Chinese episodes and
-# hit real "413 Request too large ... tokens per minute" errors in production.
-# 25,000 bytes of Chinese was empirically verified to cost ~7,800 total tokens
-# (prompt + completion) against this account's limit, leaving real headroom.
+# Keep well under Groq's tokens-per-minute limit for this model (measured at
+# 8,000 TPM for qwen/qwen3.6-27b on this account as of writing -- lower than
+# the ~12,000 seen previously, so re-verify against the live account limit
+# before changing budgets here). This is a BYTE budget, not a character
+# count, and it's tuned for the worst case: Chinese text runs roughly 3
+# bytes/char in UTF-8 *and* tokenizes far more densely than English (~0.3
+# tokens/byte vs ~0.25 tokens/char for English), so a naive character-count
+# cap sized for English silently produced requests 2-3x the size expected on
+# Chinese episodes and hit real "413 Request too large ... tokens per minute"
+# errors in production. 25,000 bytes of Chinese was empirically re-verified
+# to cost ~5,700 prompt tokens; combined with the now-longer completion
+# budget (see max_tokens in _generate_once), a single request runs ~7,900
+# total tokens -- leaving only slim headroom against the 8,000 TPM ceiling,
+# so a foreign-script retry landing in the same one-minute window can still
+# hit a 413 (the existing @retry backoff on _generate_once absorbs that by
+# waiting it out, at the cost of a slower run for that episode).
 MAX_TRANSCRIPT_BYTES = 25_000
 
 # The model occasionally leaks stray non-Persian script characters (CJK,
@@ -36,12 +43,14 @@ GENERATION_ATTEMPTS = 3
 # garbage. Above this ratio we raise instead of shipping a broken summary.
 _MAX_FOREIGN_SCRIPT_RATIO = 0.15
 
-# The whole post is sent as a single photo caption (see telegram_bot.py), and
-# Telegram hard-caps captions at 1024 characters. The prompt asks for ~800
-# chars, but LLMs don't reliably hit an exact character budget, so this is a
-# backstop: trim on a clean boundary rather than let a caption send fail.
-TELEGRAM_CAPTION_MAX_LEN = 1024
-_CAPTION_SAFETY_MARGIN = 20
+# Posts are sent as plain Telegram text messages (see telegram_bot.py), not
+# photo captions, so the relevant hard limit is Telegram's 4096-char text
+# message cap, not the much smaller 1024-char caption cap. The prompt asks
+# for ~3400-3700 chars, but LLMs don't reliably hit an exact character
+# budget, so this is a backstop: trim on a clean boundary rather than let a
+# too-long send fail outright.
+TELEGRAM_TEXT_MAX_LEN = 4096
+_TEXT_SAFETY_MARGIN = 100
 
 # Only tags Telegram's HTML parse_mode actually supports.
 SYSTEM_PROMPT = """\
@@ -63,21 +72,27 @@ SYSTEM_PROMPT = """\
    (درست: Wall Street). اگر مطمئن نیستی یک اسم خاص است یا نه، آن را انگلیسی نگه‌دار؛ ریسک
    فارسی‌نویسی‌کردن یک اسم خاص از ریسک انگلیسی گذاشتن یک کلمه‌ی عادی بیشتر است.
 
-۲. نوشتن جذاب و مبتنی بر تکنیک‌های تولید محتوا (نه صرفاً خلاصه‌نویسی ساده)، اما جمع‌وجور:
-   این پست زیر یک عکس در تلگرام به‌عنوان کپشن قرار می‌گیرد و تلگرام کپشن را به ۱۰۲۴ کاراکتر
-   محدود می‌کند؛ پس کل خروجی تو (عنوان + متن، با احتساب تگ‌های HTML) باید **بین ۹۰۰ تا ۹۵۰
-   کاراکتر** باشد — نه کمتر. این یک پادکست است، نه یک خبر کوتاه تکنولوژی؛ از کل این فضا برای
-   روایتی غنی و جذاب استفاده کن، نه یک خلاصه‌ی حداقلی. عبور از ۹۵۰ کاراکتر ممنوع است (پست
-   ارسال نمی‌شود)، اما رفتن به زیر ۸۵۰ کاراکتر هم به‌معنی هدر دادن فضای موجود برای روایت است.
+۲. نوشتن جذاب، تعاملی و مبتنی بر تکنیک‌های تولید محتوا (نه صرفاً خلاصه‌نویسی ساده)، و بلند:
+   این پست به‌صورت یک پیام متنی مستقل در تلگرام ارسال می‌شود (بدون عکس)، و تلگرام پیام متنی را
+   به ۴۰۹۶ کاراکتر محدود می‌کند؛ پس کل خروجی تو (عنوان + متن، با احتساب تگ‌های HTML) باید
+   **بین ۳۴۰۰ تا ۳۷۰۰ کاراکتر** باشد — نه کمتر. این یک خلاصه‌ی کامل یک اپیزود پادکست است، نه
+   یک خبر کوتاه؛ باید طوری نوشته شود که مخاطب حس کند کل ماجرای اپیزود را با جزئیات، مثال‌ها و
+   نکات جذاب آن دنبال کرده، نه یک چکیده‌ی فشرده. عبور از ۳۷۰۰ کاراکتر ممنوع است (پست ارسال
+   نمی‌شود)، اما رفتن به زیر ۳۲۰۰ کاراکتر هم به‌معنی هدر دادن فضای موجود برای روایت است؛ همیشه
+   تا جایی که محتوای واقعی اپیزود اجازه می‌دهد از کل این بودجه استفاده کن.
    - یک عنوان کوتاه، جذاب و کنجکاوی‌برانگیز بساز (بدون گیومه و بدون هشتگ).
    - بلافاصله بعد از عنوان، با یک «هوک» قوی شروع کن: یک سؤال چالش‌برانگیز، یک آمار/ادعای
      غافلگیرکننده، یا یک تنش/تضاد از دل خود اپیزود.
-   - در ۳ تا ۴ پاراگراف کوتاه (نه فقط یک نکته، بلکه چند نکته یا مرحله‌ی مهم داستان اپیزود)،
-     با تکنیک‌های قصه‌گویی و کپی‌رایتینگ (شکاف کنجکاوی، تعلیق، تضاد) و لحنی صمیمی و پرانرژی
-     (نه رسمی و اداری) روایت کن.
-   - در پایان، با یک جمله‌ی کوتاه تأمل‌برانگیز یا سؤالی تمام کن.
+   - در ۶ تا ۹ پاراگراف کوتاه تا متوسط، تک‌تک نکته‌ها/مراحل/مثال‌های مهم اپیزود را با جزئیات
+     واقعی (اعداد، اسم‌ها، رخدادها) باز کن — نه فقط یک جمع‌بندی کلی از هر بخش. متن باید
+     **تعاملی** باشد: هر یک یا دو پاراگراف را با یک سؤال کوتاه خطاب به خواننده، یک «تصور کن...»،
+     یا یک تضاد/غافلگیری تازه بشکن تا مخاطب درگیر بماند و حس نکند دارد یک متن یکنواخت می‌خواند.
+     از تکنیک‌های قصه‌گویی و کپی‌رایتینگ (شکاف کنجکاوی، تعلیق، تضاد) و لحنی صمیمی، پرانرژی و
+     محاوره‌ای (نه رسمی و اداری) استفاده کن.
+   - در پایان، با یک جمع‌بندی کوتاه و یک سؤال تأمل‌برانگیز خطاب به مخاطب تمام کن که او را به
+     فکر کردن یا نظر دادن دعوت کند.
    - اگر لازم شد چیزی را کم کنی تا در محدودیت کاراکتر بگنجد، جزئیات کم‌اهمیت‌تر را حذف کن، نه
-     هوک یا عنوان را؛ ولی تا حد امکان از کل بودجه‌ی ۹۰۰-۹۵۰ کاراکتری استفاده کن.
+     هوک، عنوان، یا سؤال پایانی را؛ ولی تا حد امکان از کل بودجه‌ی ۳۴۰۰-۳۷۰۰ کاراکتری استفاده کن.
 
 ۳. خروجی باید ۱۰۰٪ فارسی باشد؛ هیچ کلمه یا کاراکتری از هیچ زبان دیگری — نه چینی، نه روسی، نه
    آلمانی، نه ترکی، نه هیچ زبان دیگر — نباید در متن ظاهر شود. تنها استثنا همان نام‌های خاص
@@ -141,7 +156,7 @@ def _generate_once(client: Groq, model: str, user_prompt: str, temperature: floa
             {"role": "user", "content": user_prompt},
         ],
         temperature=temperature,
-        max_tokens=650,
+        max_tokens=2000,
         **extra_kwargs,
     )
     content = completion.choices[0].message.content.strip()
@@ -188,18 +203,18 @@ def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key:
 
 
 def _finalize(html: str) -> str:
-    return _fit_to_caption_limit(_sanitize_html(html))
+    return _fit_to_text_limit(_sanitize_html(html))
 
 
-def _fit_to_caption_limit(html: str) -> str:
-    """Trim on a clean boundary if the model ignored the ~800-char instruction,
-    so the post still fits as a single photo caption (Telegram's hard 1024-char
-    caption limit) instead of failing to send."""
-    limit = TELEGRAM_CAPTION_MAX_LEN - _CAPTION_SAFETY_MARGIN
+def _fit_to_text_limit(html: str) -> str:
+    """Trim on a clean boundary if the model ignored the ~3400-3700-char
+    instruction, so the post still fits as a single Telegram text message
+    (Telegram's hard 4096-char limit) instead of failing to send."""
+    limit = TELEGRAM_TEXT_MAX_LEN - _TEXT_SAFETY_MARGIN
     if len(html) <= limit:
         return html
 
-    logger.warning("Summary is %d chars, over the %d-char caption budget; trimming", len(html), limit)
+    logger.warning("Summary is %d chars, over the %d-char text budget; trimming", len(html), limit)
     window = html[:limit]
     cut_at = window.rfind("\n\n")
     if cut_at == -1 or cut_at < limit * 0.4:

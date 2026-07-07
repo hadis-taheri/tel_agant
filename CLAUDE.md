@@ -30,10 +30,14 @@ real Supabase/Groq/Telegram accounts — there is no mock/test mode.
 ## Architecture
 
 Pipeline: `scraper.py` (find episodes) -> `transcriber.py` (audio -> text via Groq Whisper) ->
-`summarizer.py` (text -> Persian HTML via Groq LLM) -> `telegram_bot.py` (post to channel), all
-coordinated by `main.py`, with `database.py` (Supabase) as the single source of truth for what has
-and hasn't been processed. `config.py` loads all settings from `.env` and raises immediately if a
-required var is missing — there's no partial/degraded startup.
+`summarizer.py` (text -> Persian HTML via Groq LLM) -> `image_generator.py` (Persian summary ->
+English image prompt via the same Groq LLM -> episode-topic image via Pollinations.ai) ->
+`telegram_bot.py` (post to channel), all coordinated by `main.py`, with `database.py` (Supabase) as
+the single source of truth for what has and hasn't been processed. `config.py` loads all settings
+from `.env` and raises immediately if a required var is missing — there's no partial/degraded
+startup. `image_generator.py` failures are the one exception to that fail-fast posture:
+`_run_pipeline` in main.py deliberately catches and swallows them (falls back to a generic banner)
+rather than failing the whole episode over a non-essential image.
 
 **Episode identity and dedup**: every episode is keyed by `(source, external_id)`, unique in the
 `episodes` table. `external_id` is the crossingpodcast slug or the sv101 RSS GUID.

@@ -27,6 +27,7 @@ from database import EpisodeStore, Episode
 import scraper
 import transcriber
 import summarizer
+import image_generator
 import telegram_bot
 
 logging.basicConfig(
@@ -70,11 +71,25 @@ def _run_pipeline(
         )
         store.mark_status(episode_id, database.STATUS_SUMMARIZED, summary_html=summary_html)
 
+        photo_bytes = None
+        try:
+            photo_bytes = image_generator.get_episode_image(
+                summary_html=summary_html,
+                episode_title=raw_ep.title,
+                groq_api_key=settings.groq_api_key,
+                model=settings.groq_llm_model,
+            )
+        except Exception:
+            logger.exception(
+                "[%s] Topic image generation failed; falling back to a generic banner", episode_id
+            )
+
         logger.info("[%s] Posting to Telegram", episode_id)
         message_id = telegram_bot.send_summary(
             bot_token=settings.telegram_bot_token,
             channel_id=settings.telegram_channel_id,
             summary_html=summary_html,
+            photo_bytes=photo_bytes,
         )
         store.mark_status(episode_id, final_status, telegram_message_id=message_id)
         logger.info("[%s] Done: %s as Telegram message %s", episode_id, final_status, message_id)

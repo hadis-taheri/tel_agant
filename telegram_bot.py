@@ -18,15 +18,19 @@ SAFE_CHUNK_LEN = 3800
 
 # Both podcast sources are Chinese-language; letting Telegram auto-preview the
 # episode's own page pulled in the source's Chinese title/description/cover
-# image. Rather than link to the source at all, every post opens with one of
-# these locally-generated AI/tech-themed banner images instead (no external
-# image API/account needed, so there's nothing to rate-limit or go down).
+# image. Rather than link to the source at all, every post opens with a photo
+# instead: ideally one generated for this specific episode's topic (see
+# image_generator.py), falling back to one of these generic local AI/tech
+# banners if topic-image generation isn't available or fails for this episode.
 _ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 
-def _pick_banner_image() -> Optional[str]:
+def _pick_banner_image_bytes() -> Optional[bytes]:
     candidates = sorted(glob.glob(os.path.join(_ASSETS_DIR, "topic_banner_*.jpg")))
-    return random.choice(candidates) if candidates else None
+    if not candidates:
+        return None
+    with open(random.choice(candidates), "rb") as photo_file:
+        return photo_file.read()
 
 
 def _split_message(html: str) -> List[str]:
@@ -70,19 +74,20 @@ async def send_summary_async(
     bot_token: str,
     channel_id: str,
     summary_html: str,
+    photo_bytes: Optional[bytes] = None,
 ) -> Optional[int]:
+    """Post the summary. `photo_bytes`, if given, should be an episode-specific
+    topic image (see image_generator.py); otherwise a generic local banner is
+    used so there's always some image rather than a bare wall of text."""
     bot = Bot(token=bot_token)
     chunks = _split_message(summary_html)
 
     first_message_id = None
-    banner_path = _pick_banner_image()
+    photo_bytes = photo_bytes or _pick_banner_image_bytes()
 
-    if banner_path:
+    if photo_bytes:
         title_chunk, *rest = chunks
         caption = title_chunk if len(title_chunk) <= TELEGRAM_CAPTION_MAX_LEN else None
-
-        with open(banner_path, "rb") as photo_file:
-            photo_bytes = photo_file.read()
 
         first_message_id = await _send_with_retry(
             lambda: bot.send_photo(
@@ -107,6 +112,11 @@ async def send_summary_async(
     return first_message_id
 
 
-def send_summary(bot_token: str, channel_id: str, summary_html: str) -> Optional[int]:
+def send_summary(
+    bot_token: str,
+    channel_id: str,
+    summary_html: str,
+    photo_bytes: Optional[bytes] = None,
+) -> Optional[int]:
     """Synchronous wrapper around the async Telegram send call."""
-    return asyncio.run(send_summary_async(bot_token, channel_id, summary_html))
+    return asyncio.run(send_summary_async(bot_token, channel_id, summary_html, photo_bytes))

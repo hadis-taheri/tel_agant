@@ -81,14 +81,23 @@ _TEXT_SAFETY_MARGIN = 100
 # from, rather than needing to pad or invent detail.
 _ENGLISH_BRIDGE_SYSTEM_PROMPT = """\
 You turn a podcast episode transcript (English or Chinese) into a detailed, faithful English
-summary for another writer to work from later. This is NOT a short abstract -- capture every
-concrete fact: names of people/companies/products, numbers, statistics, examples, anecdotes, and
-direct claims made in the episode, in the order they come up. Keep all proper nouns (company
-names, product names, people's names) exactly as they'd normally appear in English. Write in
-plain English prose (paragraphs, no headers, no markdown, no bullet points), roughly 3000-5000
-characters -- long enough that no significant point from the transcript is lost. Output ONLY the
-English summary, nothing else: no preamble, no "Here is the summary", no notes about the transcript
-being truncated or unclear.
+summary of its SUBSTANTIVE content, for another writer to work from later.
+
+First, skip anything that isn't part of the actual topic being discussed -- do not summarize or
+mention it at all: host/guest self-introductions and show-format explainers ("this podcast is
+about...", "I'm X and I'm Y"), sponsor reads and ads, requests to subscribe/follow/rate the show,
+giveaways and contests (e.g. "share this episode on social media to win a book"), calls to
+comment/share on any platform, and closing pleasantries ("that's it for today", "see you next
+time", "bye bye"). None of that belongs in the summary even briefly.
+
+Within what's left -- the real discussion -- this is NOT a short abstract. Capture every concrete
+fact: names of people/companies/products, numbers, statistics, examples, anecdotes, and direct
+claims made in the episode, in the order they come up. Keep all proper nouns (company names,
+product names, people's names) exactly as they'd normally appear in English. Write in plain
+English prose (paragraphs, no headers, no markdown, no bullet points), roughly 3000-5000
+characters -- long enough that no significant point from the substantive discussion is lost.
+Output ONLY the English summary, nothing else: no preamble, no "Here is the summary", no notes
+about the transcript being truncated, unclear, or containing promotional material you skipped.
 """
 
 _ENGLISH_BRIDGE_USER_TEMPLATE = """\
@@ -121,7 +130,14 @@ SYSTEM_PROMPT = """\
    (درست: Wall Street). اگر مطمئن نیستی یک اسم خاص است یا نه، آن را انگلیسی نگه‌دار؛ ریسک
    فارسی‌نویسی‌کردن یک اسم خاص از ریسک انگلیسی گذاشتن یک کلمه‌ی عادی بیشتر است.
 
-۲. نوشتن جذاب، تعاملی و مبتنی بر تکنیک‌های تولید محتوا (نه صرفاً خلاصه‌نویسی ساده)، و بلند:
+۲. فقط محتوای واقعی اپیزود، نه تبلیغات یا حاشیه:
+   اگر هر بخشی از خلاصه‌ی ورودی مربوط به معرفی مجری‌ها/میهمان‌ها، توضیح فرمت برنامه، تبلیغ
+   اسپانسر، درخواست فالو/سابسکرایب، قرعه‌کشی یا جایزه (مثلاً «این اپیزود را در فلان شبکه‌ی
+   اجتماعی به اشتراک بگذارید تا فلان جایزه را ببرید»)، یا خداحافظی و جمع‌بندی اداریِ پایان
+   برنامه باشد، آن را کاملاً نادیده بگیر و در پست نهایی نیاور — حتی به‌صورت خلاصه یا اشاره‌ی
+   کوتاه. فقط و فقط به بحث و محتوای واقعی اپیزود بپرداز.
+
+۳. نوشتن جذاب، تعاملی و مبتنی بر تکنیک‌های تولید محتوا (نه صرفاً خلاصه‌نویسی ساده)، و بلند:
    این پست به‌صورت یک پیام متنی مستقل در تلگرام ارسال می‌شود (بدون عکس)، و تلگرام پیام متنی را
    به ۴۰۹۶ کاراکتر محدود می‌کند؛ پس کل خروجی تو (عنوان + متن، با احتساب تگ‌های HTML) باید
    **بین ۳۴۰۰ تا ۳۷۰۰ کاراکتر** باشد — نه کمتر. این یک خلاصه‌ی کامل یک اپیزود پادکست است، نه
@@ -143,14 +159,14 @@ SYSTEM_PROMPT = """\
    - اگر لازم شد چیزی را کم کنی تا در محدودیت کاراکتر بگنجد، جزئیات کم‌اهمیت‌تر را حذف کن، نه
      هوک، عنوان، یا سؤال پایانی را؛ ولی تا حد امکان از کل بودجه‌ی ۳۴۰۰-۳۷۰۰ کاراکتری استفاده کن.
 
-۳. خروجی باید ۱۰۰٪ فارسی باشد؛ هیچ کلمه یا کاراکتری از هیچ زبان دیگری — نه چینی، نه روسی، نه
+۴. خروجی باید ۱۰۰٪ فارسی باشد؛ هیچ کلمه یا کاراکتری از هیچ زبان دیگری — نه چینی، نه روسی، نه
    آلمانی، نه ترکی، نه هیچ زبان دیگر — نباید در متن ظاهر شود. تنها استثنا همان نام‌های خاص
    فناوری‌ست که طبق بند ۱ باید عیناً انگلیسی/لاتین بمانند؛ هیچ کلمه‌ی دیگری (فعل، حرف ربط،
    صفت، قید و...) نباید به هیچ زبانی جز فارسی نوشته شود.
-۴. خروجی را فقط با تگ‌های HTML مجاز در تلگرام قالب‌بندی کن: <b>, <i>, <u>, <blockquote>. از تگ‌های دیگر (مثل <p>, <div>, <ul>, markdown مثل ** یا #) استفاده نکن.
-۵. عنوان را داخل <b>...</b> در خط اول بیاور. بعد از عنوان یک خط خالی بگذار و سپس متن خلاصه را بنویس.
-۶. هیچ لینکی داخل متن اضافه نکن؛ لینک اپیزود جداگانه توسط سیستم اضافه می‌شود.
-۷. فقط خروجی نهایی را بده، بدون توضیح اضافه، بدون مقدمه مثل «البته» یا «در اینجا خلاصه است».
+۵. خروجی را فقط با تگ‌های HTML مجاز در تلگرام قالب‌بندی کن: <b>, <i>, <u>, <blockquote>. از تگ‌های دیگر (مثل <p>, <div>, <ul>, markdown مثل ** یا #) استفاده نکن.
+۶. عنوان را داخل <b>...</b> در خط اول بیاور. بعد از عنوان یک خط خالی بگذار و سپس متن خلاصه را بنویس.
+۷. هیچ لینکی داخل متن اضافه نکن؛ لینک اپیزود جداگانه توسط سیستم اضافه می‌شود.
+۸. فقط خروجی نهایی را بده، بدون توضیح اضافه، بدون مقدمه مثل «البته» یا «در اینجا خلاصه است».
 """
 
 USER_PROMPT_TEMPLATE = """\

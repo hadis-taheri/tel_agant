@@ -112,9 +112,16 @@ will never be picked up again by `run_once`/`process_backlog_once` on its own. T
 either delete its row or manually reset its `status` back to `pending` (see README's "نکات مهم"
 section) — there's no code path that does this automatically.
 
-**Telegram delivery**: `telegram_bot.py` splits long summaries across multiple messages at
-paragraph boundaries (Telegram's 4096-char limit) and appends the source episode link as a
-separate footer chunk rather than trusting the LLM to include a correct link in its own output.
+**Telegram delivery**: `telegram_bot.py` opens every post with a photo from `assets/topic_banner_*.jpg`
+(picked at random) using the summary's title as the caption, then sends the rest of the body as
+follow-up text message(s), splitting on paragraph boundaries when needed (Telegram's 4096-char
+text / 1024-char caption limits). There's deliberately no link back to the source episode in the
+post: Telegram auto-previews any URL in a message, and the source pages (crossingpodcast.com,
+fireside.fm) are Chinese, so a source link pulled in a Chinese title/description/cover image via
+the auto-preview — the banner images exist specifically to replace that with something on-brand.
+The banners are static images generated once via `gen_banners.py` (PIL, abstract network/circuit
+art) and checked into `assets/`, not a live image-search API call, so there's nothing external to
+rate-limit or go down. Re-run `gen_banners.py` to regenerate/vary the set.
 
 ## External accounts this project depends on
 

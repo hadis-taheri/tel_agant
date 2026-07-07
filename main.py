@@ -71,13 +71,10 @@ def _run_pipeline(
         store.mark_status(episode_id, database.STATUS_SUMMARIZED, summary_html=summary_html)
 
         logger.info("[%s] Posting to Telegram", episode_id)
-        source_label = "sv101" if raw_ep.source == scraper.SOURCE_SV101 else "Crossing Podcast"
         message_id = telegram_bot.send_summary(
             bot_token=settings.telegram_bot_token,
             channel_id=settings.telegram_channel_id,
             summary_html=summary_html,
-            episode_url=raw_ep.episode_url,
-            source_label=source_label,
         )
         store.mark_status(episode_id, final_status, telegram_message_id=message_id)
         logger.info("[%s] Done: %s as Telegram message %s", episode_id, final_status, message_id)

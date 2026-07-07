@@ -1,6 +1,9 @@
 """Publishes the generated Persian summary to a Telegram channel."""
 import asyncio
+import glob
 import logging
+import os
+import random
 from typing import List, Optional
 
 from telegram import Bot
@@ -10,11 +13,23 @@ from telegram.error import RetryAfter, TimedOut, TelegramError
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_LEN = 4096
-# Leave headroom for the "لینک اپیزود" footer appended to the last chunk.
+TELEGRAM_CAPTION_MAX_LEN = 1024
 SAFE_CHUNK_LEN = 3800
 
+# Both podcast sources are Chinese-language; letting Telegram auto-preview the
+# episode's own page pulled in the source's Chinese title/description/cover
+# image. Rather than link to the source at all, every post opens with one of
+# these locally-generated AI/tech-themed banner images instead (no external
+# image API/account needed, so there's nothing to rate-limit or go down).
+_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
-def _split_message(html: str, footer: str) -> List[str]:
+
+def _pick_banner_image() -> Optional[str]:
+    candidates = sorted(glob.glob(os.path.join(_ASSETS_DIR, "topic_banner_*.jpg")))
+    return random.choice(candidates) if candidates else None
+
+
+def _split_message(html: str) -> List[str]:
     """Split a long HTML body into Telegram-sized chunks on paragraph breaks."""
     paragraphs = html.split("\n\n")
     chunks: List[str] = []
@@ -31,27 +46,17 @@ def _split_message(html: str, footer: str) -> List[str]:
     if current:
         chunks.append(current)
 
-    if not chunks:
-        chunks = [html]
-
-    chunks[-1] = f"{chunks[-1]}\n\n{footer}"
-    if len(chunks[-1]) > TELEGRAM_MAX_LEN:
-        chunks.append(footer)
-    return chunks
+    return chunks or [html]
 
 
-async def _send_with_retry(bot: Bot, channel_id: str, text: str, max_attempts: int = 4) -> int:
-    last_id = None
+async def _send_with_retry(send_coro_factory, max_attempts: int = 4) -> int:
+    """Call `send_coro_factory()` (a zero-arg callable returning a fresh awaitable
+    each time, since a single coroutine object can't be awaited twice) with
+    retry-after/timeout handling. Returns the sent message's id."""
     for attempt in range(1, max_attempts + 1):
         try:
-            message = await bot.send_message(
-                chat_id=channel_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=False,
-            )
-            last_id = message.message_id
-            return last_id
+            message = await send_coro_factory()
+            return message.message_id
         except RetryAfter as exc:
             logger.warning("Telegram rate limit hit, sleeping %.1fs", exc.retry_after)
             await asyncio.sleep(exc.retry_after + 1)
@@ -65,21 +70,43 @@ async def send_summary_async(
     bot_token: str,
     channel_id: str,
     summary_html: str,
-    episode_url: str,
-    source_label: str,
 ) -> Optional[int]:
     bot = Bot(token=bot_token)
-    footer = f'📎 <a href="{episode_url}">شنیدن نسخه اصلی اپیزود ({source_label})</a>'
-    chunks = _split_message(summary_html, footer)
+    chunks = _split_message(summary_html)
 
     first_message_id = None
-    for chunk in chunks:
-        message_id = await _send_with_retry(bot, channel_id, chunk)
+    banner_path = _pick_banner_image()
+
+    if banner_path:
+        title_chunk, *rest = chunks
+        caption = title_chunk if len(title_chunk) <= TELEGRAM_CAPTION_MAX_LEN else None
+
+        with open(banner_path, "rb") as photo_file:
+            photo_bytes = photo_file.read()
+
+        first_message_id = await _send_with_retry(
+            lambda: bot.send_photo(
+                chat_id=channel_id,
+                photo=photo_bytes,
+                caption=caption,
+                parse_mode=ParseMode.HTML if caption else None,
+            )
+        )
+        # If the title alone didn't fit as a caption, send it as the first text chunk.
+        remaining_chunks = rest if caption else chunks
+    else:
+        remaining_chunks = chunks
+
+    for chunk in remaining_chunks:
+        message_id = await _send_with_retry(
+            lambda c=chunk: bot.send_message(chat_id=channel_id, text=c, parse_mode=ParseMode.HTML)
+        )
         if first_message_id is None:
             first_message_id = message_id
+
     return first_message_id
 
 
-def send_summary(bot_token: str, channel_id: str, summary_html: str, episode_url: str, source_label: str) -> Optional[int]:
+def send_summary(bot_token: str, channel_id: str, summary_html: str) -> Optional[int]:
     """Synchronous wrapper around the async Telegram send call."""
-    return asyncio.run(send_summary_async(bot_token, channel_id, summary_html, episode_url, source_label))
+    return asyncio.run(send_summary_async(bot_token, channel_id, summary_html))

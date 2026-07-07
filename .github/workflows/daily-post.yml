@@ -1,9 +1,13 @@
 name: Hourly podcast digest
 
-# Runs at the top of every hour.
+# Runs every hour, offset from the top of the hour. GitHub's own docs warn
+# that schedule triggers queued for exactly :00 (the busiest minute across
+# all of GitHub Actions) can be delayed or dropped under load -- confirmed
+# in practice here: only 2 of the ~10 expected hourly runs between 11:21 and
+# 21:20 UTC on 2026-07-07 actually fired. Minute 7 avoids that peak.
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "7 * * * *"
   workflow_dispatch: {} # allows manually triggering a run from the Actions tab
 
 jobs:

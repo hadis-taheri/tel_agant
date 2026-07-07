@@ -59,7 +59,8 @@ meaning "explicitly skipped, never process". The only branch is the final status
 - Phase 2 (`scrape_backlog` + `process_backlog_once`): walks each source's *entire* historical
   archive, queues anything not-yet-known as `pending`, then processes exactly **one**
   oldest-`pending` row per invocation *at most once every `MIN_BACKLOG_INTERVAL_MINUTES`
-  (default 50)* — this is deliberate throttling, both to work through hundreds of old episodes
+  (default 75, chosen to land at ~18-19 real episodes/day -- see the Groq TPD note below)* — this
+  is deliberate throttling, both to work through hundreds of old episodes
   one-at-a-time instead of all at once on first run, and to cap real Groq token spend per day
   (see the scheduling note below for why the second part matters: the GitHub Actions cron fires
   4x/hour, not once, so without a wall-clock throttle every firing that lands would process a

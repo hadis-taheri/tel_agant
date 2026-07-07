@@ -28,6 +28,14 @@ _FOREIGN_SCRIPT_RE = re.compile(
 )
 GENERATION_ATTEMPTS = 3
 
+# If foreign-script characters are only a small stray fraction of the output,
+# stripping them still leaves a readable Persian summary. But if the model
+# fails outright and answers mostly/entirely in the source language (seen in
+# production on a Chinese episode: stripping left only numbers, punctuation,
+# and English company names -- effectively empty), stripping instead produces
+# garbage. Above this ratio we raise instead of shipping a broken summary.
+_MAX_FOREIGN_SCRIPT_RATIO = 0.15
+
 # Only tags Telegram's HTML parse_mode actually supports.
 SYSTEM_PROMPT = """\
 تو یک تولیدکننده‌ی محتوای حرفه‌ای فارسی‌زبان هستی که برای یک کانال تلگرامی پادکست می‌نویسی —
@@ -114,7 +122,11 @@ def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key:
 
     The model occasionally leaks stray characters from an unrelated script
     (e.g. Chinese) into the Persian output; if that happens we regenerate a
-    couple of times before falling back to stripping the offending runs.
+    couple of times before falling back to stripping the offending runs --
+    but only when that leakage is minor. If the model instead fails outright
+    and responds mostly in the source language, stripping would ship a
+    near-empty, unreadable message, so we raise instead (the caller marks the
+    episode 'failed' rather than posting broken content).
     """
     client = Groq(api_key=groq_api_key)
     user_prompt = USER_PROMPT_TEMPLATE.format(title=episode_title, transcript=_truncate(transcript))
@@ -129,9 +141,25 @@ def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key:
             attempt, GENERATION_ATTEMPTS,
         )
 
+    ratio = _foreign_script_ratio(html)
+    if ratio > _MAX_FOREIGN_SCRIPT_RATIO:
+        raise ValueError(
+            f"LLM failed to produce a majority-Persian summary after {GENERATION_ATTEMPTS} attempts "
+            f"({ratio:.0%} non-Persian-script characters) -- refusing to post a garbled summary"
+        )
+
     logger.warning("Stray non-Persian characters persisted after %d attempts; stripping them", GENERATION_ATTEMPTS)
     html = _FOREIGN_SCRIPT_RE.sub(" ", html)
     return _sanitize_html(_collapse_whitespace(html))
+
+
+def _foreign_script_ratio(text: str) -> float:
+    """Fraction of non-whitespace characters that belong to a foreign script."""
+    non_space = re.sub(r"\s", "", text)
+    if not non_space:
+        return 0.0
+    foreign_chars = sum(len(match) for match in _FOREIGN_SCRIPT_RE.findall(text))
+    return foreign_chars / len(non_space)
 
 
 def _collapse_whitespace(html: str) -> str:

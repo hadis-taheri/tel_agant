@@ -10,7 +10,15 @@ from telegram.error import RetryAfter, TimedOut, TelegramError
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_LEN = 4096
-SAFE_CHUNK_LEN = 3800
+# summarizer.py already targets and enforces a single-message summary (see
+# TELEGRAM_TEXT_MAX_LEN - _TEXT_SAFETY_MARGIN there, currently 3996) before
+# this module ever sees it -- this split is only meant to catch that
+# guarantee somehow failing, not to re-chunk something that already fits.
+# Must stay >= summarizer's own ceiling, or a summary summarizer considers
+# "fits in one message" gets needlessly split into two here anyway (this
+# was a real bug: 3800 here vs. 3996 there silently split a 3976-char
+# single-message summary into two Telegram messages).
+SAFE_CHUNK_LEN = 4000
 
 
 def _split_message(html: str) -> List[str]:

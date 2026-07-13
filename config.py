@@ -30,6 +30,7 @@ class Settings:
 
     crossingpodcast_api: str
     sv101_rss_url: str
+    lenny_feed_url: str
 
     check_interval_minutes: int
     max_episodes_per_run: int
@@ -50,6 +51,7 @@ def load_settings() -> Settings:
             "CROSSINGPODCAST_API", "https://crossingpodcast.com/api/trpc/episodes.list"
         ),
         sv101_rss_url=os.getenv("SV101_RSS_URL", "https://feeds.fireside.fm/sv101/rss"),
+        lenny_feed_url=os.getenv("LENNY_FEED_URL", "https://api.substack.com/feed/podcast/10845.rss"),
         check_interval_minutes=int(os.getenv("CHECK_INTERVAL_MINUTES", "60")),
         max_episodes_per_run=int(os.getenv("MAX_EPISODES_PER_RUN", "3")),
         min_backlog_interval_minutes=int(os.getenv("MIN_BACKLOG_INTERVAL_MINUTES", "75")),

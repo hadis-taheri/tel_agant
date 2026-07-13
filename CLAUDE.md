@@ -43,9 +43,9 @@ same for `telegram_bot.py`'s former banner-fallback assets under `assets/topic_b
 `gen_banners.py`.
 
 **Episode identity and dedup**: every episode is keyed by `(source, external_id)`, unique in the
-`episodes` table. `external_id` is the crossingpodcast slug or the sv101 RSS GUID.
-`EpisodeStore.is_known()` is the dedup check used everywhere before inserting a row — nothing else
-in the codebase decides whether an episode is new.
+`episodes` table. `external_id` is the crossingpodcast slug, the sv101 RSS GUID, or the Lenny post
+slug (`/p/<slug>` parsed out of the episode link). `EpisodeStore.is_known()` is the dedup check used
+everywhere before inserting a row — nothing else in the codebase decides whether an episode is new.
 
 **Status state machine** (single `status` column, no enum/CHECK constraint — see `database.py`
 docstring for the full list): `pending` -> `downloading` -> `transcribed` -> `summarized` ->
@@ -66,12 +66,15 @@ meaning "explicitly skipped, never process". The only branch is the final status
   4x/hour, not once, so without a wall-clock throttle every firing that lands would process a
   *different* episode). `scrape_backlog` (queueing) always runs regardless of the throttle since
   it costs no LLM tokens; only the actual `_run_pipeline` call is gated.
-  `EpisodeStore.get_oldest_pending(exclude_source=...)` alternates which
-  source that one episode comes from: `process_backlog_once` looks up the source of the
-  most-recently-finalized episode (`get_last_finalized`) and prefers the *other* source's
-  oldest pending row, falling back to any pending row if that source's backlog is empty. This
-  means consecutive backlog runs alternate crossingpodcast/sv101 instead of draining one source's
-  entire archive before ever touching the other.
+  `EpisodeStore.get_oldest_pending(exclude_sources=...)` rotates fairly across all 3 sources:
+  `process_backlog_once` fetches the sources of the last 2 finalized episodes
+  (`get_recent_finalized_sources`) and prefers a pending row from a source *not* in that list,
+  falling back to the overall-oldest pending row if every candidate in the oldest-20 window is
+  excluded. With only 2 sources, excluding the single last one was enough to force strict
+  alternation; with 3 it isn't (excluding just 1 of 3 still lets the same 1 of the other 2 win
+  every time if it happens to always have the older pending row), hence excluding the last 2
+  finalized sources, not just the last 1 -- rotation was originally crossingpodcast/sv101 only,
+  expanded to 3-way when Lenny's Podcast was added (see "Third source" below).
 - `daily_cycle()` just runs phase 1 then phase 2; `--loop` repeats `daily_cycle` on a timer.
   `main.py`'s own `_run_pipeline()` is the only place that actually calls transcriber/summarizer/
   telegram_bot — phase 1 and phase 2 both funnel through it with a different `final_status`.
@@ -86,6 +89,43 @@ meaning "explicitly skipped, never process". The only branch is the final status
 - sv101.fireside.fm has a normal RSS feed, and feedparser returns the *entire* history in one
   request — so `fetch_sv101_episodes` doubles as both the "latest" and "archive" fetch for that
   source; there's no separate archive function for it.
+- lennysnewsletter.com (Lenny's Podcast, source name `lenny`) is Substack-hosted. The obvious feed,
+  `www.lennysnewsletter.com/feed`, is the wrong one to use: it only returns the ~20 most recent
+  items and mixes real episodes together with plain newsletter posts (essays, weekly "How I AI"
+  link roundups, "Community Wisdom" digests) that have no episode audio at all — the only reliable
+  way to tell them apart from that feed is checking for a genuine `audio/mpeg` enclosure vs. a
+  cover-image-only one. `fetch_lenny_episodes` instead uses Substack's *dedicated* podcast-only RSS
+  feed (`api.substack.com/feed/podcast/<show-id>.rss` — the same feed Apple Podcasts/Spotify
+  actually subscribe to; found via the show's Apple Podcasts page / iTunes lookup API, since
+  Substack doesn't surface this URL anywhere obvious on the newsletter site itself). That feed only
+  ever contains real episodes and returns the *entire* history in one response (352 episodes back
+  to 2022-06-05 as of writing) — so, like sv101, `fetch_lenny_episodes` doubles as both the "latest"
+  and "archive" fetch, and no separate audio-filtering step is needed.
+
+**Third source (Lenny's Podcast) is native English, so it skips the Chinese/English bridge
+entirely**: `summarize_to_persian_html(..., already_english=True)` (set in `main.py` via
+`is_lenny = raw_ep.source == scraper.SOURCE_LENNY`) skips `_translate_to_english()` and feeds the
+raw transcript straight into the Persian step, using `DIRECT_ENGLISH_MAX_TRANSCRIPT_BYTES` instead
+of `MAX_TRANSCRIPT_BYTES` for truncation. `transcriber.transcribe_episode()` is also told
+`language="en"` explicitly for this source instead of relying on Whisper auto-detect.
+
+That direct-English byte budget caused a real incident on first production run: it was initially
+set to 20,000 bytes on the assumption that only the transcript's own token cost mattered, forgetting
+that skipping the bridge step means this call uses the full Persian `SYSTEM_PROMPT` (the long
+copywriting/storytelling instructions) directly against the raw transcript, and that system prompt
+itself costs real tokens on every call. All 3 Lenny episodes phase 1 picked on the first run after
+adding this source failed with `413 ... tokens per minute (TPM): Limit 8000, Requested 8024` —
+i.e. transcript + system prompt alone were already ~6,024 tokens before the 2,000-token completion
+reservation. Lowered to 15,000 bytes, re-verified against one of the actual failed transcripts (now
+succeeds). Re-verify this math the same way before raising it again.
+
+**`--seed-only` is dangerous to re-run once Lenny has any backlog queued**: unlike
+crossingpodcast/sv101 (where the "latest" fetch is genuinely just the newest page/items),
+`fetch_lenny_episodes` returns Lenny's *entire* history every time (see above) — so
+`seed_existing_episodes` (`--seed-only`) would mark **every** not-yet-known Lenny episode as
+`seeded` (skip forever), silently discarding the entire historical backfill. Only safe to run
+`--seed-only` for Lenny before its first `scrape_backlog` call has ever queued anything; after that,
+just let phase 2 drain the `pending` backlog normally.
 
 **LLM model choice**: `GROQ_LLM_MODEL` defaults to `qwen/qwen3.6-27b`, not a Llama model. Both
 podcast sources here are Chinese-language, and `llama-3.3-70b-versatile` proved unreliable at
@@ -122,8 +162,10 @@ which reads as more English-anchored already), and two different crossingpodcast
 came back 72-74% non-Persian after all 3 retries at the ~3400-3700-char target before this fix —
 both succeeded on the first attempt afterward. Chinese -> English is a far more common/reliable
 task for this model than Chinese -> Persian directly; English -> Persian was already the reliable
-half of this pipeline. Applies uniformly to both sources (not just crossingpodcast) to keep the
-pipeline logic simple — it doesn't hurt sv101's already-good results.
+half of this pipeline. Applies uniformly to both Chinese-source podcasts (not just crossingpodcast)
+to keep the pipeline logic simple — it doesn't hurt sv101's already-good results. Lenny's Podcast
+(source `lenny`) is the one exception: its transcript is already native English, so it bypasses this
+bridge step entirely via `already_english=True` — see the "Third source" note further up.
 
 Each step has its own foreign-script leak check, since each targets a different output language:
 `_translate_to_english` retries (`BRIDGE_GENERATION_ATTEMPTS`) if too much non-ASCII leaks into
@@ -196,6 +238,15 @@ LLM overshoots that budget anyway, `summarizer._fit_to_text_limit()` trims on a 
 paragraph breaks if a summary somehow still exceeds 4096 chars. Don't raise the ~3400-3700-char
 prompt target without re-checking the token math in the `MAX_TRANSCRIPT_BYTES` comment above still
 holds (raising the completion length eats into the same per-minute token budget as the transcript).
+
+**`telegram_bot.SAFE_CHUNK_LEN` must stay >= `summarizer`'s own single-message ceiling**: a real
+incident — `SAFE_CHUNK_LEN` was 3800 while `summarizer.py`'s own limit
+(`TELEGRAM_TEXT_MAX_LEN - _TEXT_SAFETY_MARGIN`) is 3996, so a 3976-char summary that `summarizer.py`
+already considered "fits in one message" got needlessly cut into two Telegram messages by
+`_split_message`'s stricter threshold anyway. `_split_message` is documented as a fallback for if
+summarizer's own guarantee "ever doesn't" hold, not a second, tighter limit — raised to 4000 so it
+only fires for an actual guarantee failure. Keep it just under 4096 and above whatever
+`summarizer.py` currently targets if either budget changes.
 
 **Every paragraph is prefixed with a Unicode RTL mark before sending**: reported symptom was
 Telegram posts not rendering right-to-left consistently, with odd-looking leading gaps on some

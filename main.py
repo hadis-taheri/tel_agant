@@ -50,6 +50,7 @@ def _run_pipeline(
     Shared by both phase 1 (new episodes, final_status='posted') and phase 2
     (backlog episodes, final_status='processed').
     """
+    is_lenny = raw_ep.source == scraper.SOURCE_LENNY
     try:
         logger.info("[%s] Transcribing: %s", episode_id, raw_ep.title)
         transcript = transcriber.transcribe_episode(
@@ -57,6 +58,9 @@ def _run_pipeline(
             tmp_dir=settings.temp_dir,
             groq_api_key=settings.groq_api_key,
             model=settings.groq_stt_model,
+            # Lenny's Podcast is native English; telling Whisper the language
+            # up front (instead of auto-detecting) improves accuracy.
+            language="en" if is_lenny else None,
         )
         if not transcript.strip():
             raise ValueError("Empty transcript returned by STT")
@@ -68,6 +72,9 @@ def _run_pipeline(
             episode_title=raw_ep.title,
             groq_api_key=settings.groq_api_key,
             model=settings.groq_llm_model,
+            # Lenny's transcript is already English: skip the Chinese/English
+            # bridge step and translate directly to Persian.
+            already_english=is_lenny,
         )
         store.mark_status(episode_id, database.STATUS_SUMMARIZED, summary_html=summary_html)
 
@@ -107,7 +114,9 @@ def seed_existing_episodes(settings: Settings) -> int:
     history of a source (e.g. sv101's RSS feed has 250+ past episodes).
     """
     store = EpisodeStore(settings.supabase_url, settings.supabase_key)
-    raw_episodes = scraper.fetch_all_episodes(settings.crossingpodcast_api, settings.sv101_rss_url)
+    raw_episodes = scraper.fetch_all_episodes(
+        settings.crossingpodcast_api, settings.sv101_rss_url, settings.lenny_feed_url
+    )
 
     count = 0
     for raw_ep in raw_episodes:
@@ -132,7 +141,9 @@ def run_once(settings: Settings) -> int:
     store = EpisodeStore(settings.supabase_url, settings.supabase_key)
 
     try:
-        raw_episodes = scraper.fetch_all_episodes(settings.crossingpodcast_api, settings.sv101_rss_url)
+        raw_episodes = scraper.fetch_all_episodes(
+            settings.crossingpodcast_api, settings.sv101_rss_url, settings.lenny_feed_url
+        )
     except Exception:
         logger.exception("Failed to fetch episode lists; skipping this run")
         return 0
@@ -161,7 +172,9 @@ def scrape_backlog(settings: Settings) -> int:
     """
     store = EpisodeStore(settings.supabase_url, settings.supabase_key)
     try:
-        raw_episodes = scraper.fetch_full_archive(settings.crossingpodcast_api, settings.sv101_rss_url)
+        raw_episodes = scraper.fetch_full_archive(
+            settings.crossingpodcast_api, settings.sv101_rss_url, settings.lenny_feed_url
+        )
     except Exception:
         logger.exception("Failed to fetch archive; skipping backlog scrape")
         return 0
@@ -192,10 +205,11 @@ def process_backlog_once(settings: Settings) -> bool:
     episode was processed, False if the backlog is empty or the throttle
     below skipped this invocation.
 
-    Alternates sources run to run: picks the oldest pending episode from a
-    source different than whichever source was posted/processed last, so
-    consecutive backlog runs alternate crossingpodcast/sv101 instead of
-    draining one source's entire archive before touching the other.
+    Rotates fairly across all 3 sources: picks the oldest pending episode
+    from a source other than either of the last 2 finalized ones (falling
+    back to the oldest pending episode from any source if that excludes
+    everything), so consecutive backlog runs cycle crossingpodcast/sv101/lenny
+    instead of draining one source's entire archive before touching others.
 
     Throttled to at most one real (LLM-costing) episode per
     MIN_BACKLOG_INTERVAL_MINUTES, independent of how often this function is
@@ -221,8 +235,8 @@ def process_backlog_once(settings: Settings) -> bool:
             )
             return False
 
-    last_source = last["source"] if last else None
-    row = store.get_oldest_pending(exclude_source=last_source)
+    recent_sources = store.get_recent_finalized_sources(limit=2)
+    row = store.get_oldest_pending(exclude_sources=recent_sources)
     if not row:
         logger.info("Backlog is empty: no pending archive episodes to process.")
         return False

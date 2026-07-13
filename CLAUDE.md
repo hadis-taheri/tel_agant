@@ -141,6 +141,15 @@ half of either check without re-testing against real (not just English) transcri
 also has an explicit, deliberate rule: tool/model/company names (OpenAI, Claude Code, Anthropic,
 etc.) must stay in English/Latin script, never transliterated.
 
+**Both prompt stages explicitly skip promotional/administrative filler**: a live post once included
+host self-introductions and a New Year book-giveaway promo ("share this episode on WeChat
+Moments/Jike, screenshot it in Xiaoyuzhou's comments") lifted straight from the podcast's own
+intro — noise that doesn't belong in a content summary. `_ENGLISH_BRIDGE_SYSTEM_PROMPT` now
+instructs the bridge step to skip host/guest introductions, show-format explainers, sponsor reads,
+subscribe/follow requests, giveaways/contests, and closing pleasantries entirely rather than
+summarizing them; `SYSTEM_PROMPT`'s rule 2 is a safety net in case any of that still slips through
+into the English bridge text anyway.
+
 **Transcript truncation is byte-based, not char-based, on purpose**: `MAX_TRANSCRIPT_BYTES` in
 `summarizer.py` truncates by UTF-8 byte length before the request goes to Groq (only the bridge
 step, `_translate_to_english`, ever sees the raw transcript — see the two-step-pivot note above).
@@ -187,6 +196,17 @@ LLM overshoots that budget anyway, `summarizer._fit_to_text_limit()` trims on a 
 paragraph breaks if a summary somehow still exceeds 4096 chars. Don't raise the ~3400-3700-char
 prompt target without re-checking the token math in the `MAX_TRANSCRIPT_BYTES` comment above still
 holds (raising the completion length eats into the same per-minute token budget as the transcript).
+
+**Every paragraph is prefixed with a Unicode RTL mark before sending**: reported symptom was
+Telegram posts not rendering right-to-left consistently, with odd-looking leading gaps on some
+paragraphs. Root cause: Telegram (like most renderers) picks each paragraph's base text direction
+from its first *strong-directional* character, and an opening `<b>` tag has none — so a paragraph
+that happens to start with an English proper noun (common here: "Tesla ...", "OpenAI ...") gets
+misdetected as LTR even though the rest is Persian. `summarizer._finalize()` now runs the output
+through `_force_rtl_paragraphs()`, which prefixes every paragraph with U+200F (RIGHT-TO-LEFT MARK,
+written as an explicit `‏` escape in the source rather than a literal invisible character —
+see the bidi-corruption incident below for why that distinction matters here specifically). No
+visible change to the text, just forces RTL regardless of the first character.
 
 There's deliberately no link back to the source episode in the post: Telegram auto-previews any URL
 in a message, and the source pages (crossingpodcast.com, fireside.fm) are Chinese, so a source link

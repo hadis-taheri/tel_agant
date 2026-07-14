@@ -259,3 +259,19 @@ Actions logs: `UnicodeEncodeError: 'ascii' codec can't encode characters in posi
 an HTTP client's header-construction code (e.g. `postgrest`/`httpx`), even though the source value
 is verified pure-ASCII. Fix: re-copy the value from a plain source (e.g. the `.env` file opened in
 a plain text editor), not from any RTL-rendering terminal/chat output.
+
+**A third source (Lenny's Podcast, lennysnewsletter.com) was added and then reverted** -- worth
+knowing before trying again with any Substack-hosted podcast. Discovery worked fine (Substack's
+dedicated podcast RSS feed, `api.substack.com/feed/podcast/<show-id>.rss`, returns full history
+same as sv101), but actually downloading the audio consistently failed with `403 Forbidden`
+specifically when run from GitHub Actions runners -- confirmed via direct comparison: the exact
+same `api.substack.com/feed/podcast/.../*.mp3` URL that 403'd on Actions returned `200 OK` from a
+residential/dev network every time. This matches Cloudflare's known pattern of blocking/challenging
+requests from cloud-provider IP ranges (AWS/Azure/GCP/GitHub Actions) more aggressively than from
+consumer networks. Giving `download_audio()` a browser-style User-Agent and retry (see
+`transcriber.py` -- kept, since it's a reasonable general hardening and crossingpodcast has hit its
+own unrelated connection failures before) did **not** fix it; the block persisted across retries,
+meaning it's IP-reputation-based, not a transient rate limit or a UA fingerprint issue. Before
+re-adding a Substack-hosted (or any Cloudflare-fronted) source, test the actual audio *download*
+specifically from a GitHub Actions run, not just from a dev machine -- discovery/RSS endpoints
+being reachable does not mean the CDN-hosted audio file will be.

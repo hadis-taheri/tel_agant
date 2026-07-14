@@ -23,13 +23,36 @@ DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 CHUNK_LENGTH_MS = 10 * 60 * 1000  # 10 minutes
 MAX_CHUNK_FILE_BYTES = 20 * 1024 * 1024  # 20 MB safety margin
 
+# Bare "PodcastAgent/1.0" (no browser-style prefix, no Accept header) is a
+# classic bot fingerprint -- real incident: Lenny's Podcast audio URLs
+# (api.substack.com/feed/podcast/.../*.mp3, which 307-redirect to a signed
+# substackcdn.com/Cloudflare URL) downloaded fine from a residential/dev
+# network but came back 403 Forbidden specifically from GitHub Actions
+# runners, matching Cloudflare's well-known pattern of blocking/challenging
+# known cloud-provider IP ranges more aggressively for suspicious-looking
+# requests. crossingpodcast/sv101 use different, less-protected hosts and
+# never hit this. Matching scraper.py's browser-style UA plus a real Accept
+# header is a cheap mitigation; it's not guaranteed to defeat pure
+# IP-reputation blocking, hence also adding retry below for the cases where
+# it's a transient challenge rather than a hard block.
+DOWNLOAD_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; PodcastAgent/1.0)",
+    "Accept": "*/*",
+}
 
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=3, min=3, max=30),
+    retry=retry_if_exception_type(requests.exceptions.RequestException),
+)
 def download_audio(url: str, dest_dir: str) -> str:
     os.makedirs(dest_dir, exist_ok=True)
     ext = os.path.splitext(url.split("?")[0])[1] or ".mp3"
     dest_path = os.path.join(dest_dir, f"{uuid.uuid4().hex}{ext}")
 
-    with requests.get(url, stream=True, timeout=HTTP_TIMEOUT, headers={"User-Agent": "PodcastAgent/1.0"}) as resp:
+    with requests.get(url, stream=True, timeout=HTTP_TIMEOUT, headers=DOWNLOAD_HEADERS) as resp:
         resp.raise_for_status()
         with open(dest_path, "wb") as fh:
             for chunk in resp.iter_content(chunk_size=DOWNLOAD_CHUNK_BYTES):

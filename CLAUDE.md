@@ -58,21 +58,24 @@ meaning "explicitly skipped, never process". The only branch is the final status
   every not-yet-known episode found there (capped by `MAX_EPISODES_PER_RUN`), oldest first.
 - Phase 2 (`scrape_backlog` + `process_backlog_once`): walks each source's *entire* historical
   archive, queues anything not-yet-known as `pending`, then processes exactly **one**
-  oldest-`pending` row per invocation *at most once every `MIN_BACKLOG_INTERVAL_MINUTES`
+  newest-`pending` row per invocation *at most once every `MIN_BACKLOG_INTERVAL_MINUTES`
   (default 75, chosen to land at ~18-19 real episodes/day -- see the Groq TPD note below)* — this
   is deliberate throttling, both to work through hundreds of old episodes
   one-at-a-time instead of all at once on first run, and to cap real Groq token spend per day
   (see the scheduling note below for why the second part matters: the GitHub Actions cron fires
   4x/hour, not once, so without a wall-clock throttle every firing that lands would process a
   *different* episode). `scrape_backlog` (queueing) always runs regardless of the throttle since
-  it costs no LLM tokens; only the actual `_run_pipeline` call is gated.
-  `EpisodeStore.get_oldest_pending(exclude_sources=...)` rotates fairly across all 3 sources:
+  it costs no LLM tokens; only the actual `_run_pipeline` call is gated. Newest-pending-first (not
+  oldest-first) is deliberate, by request: each source's backlog catches up to its recent episodes
+  quickly, with the oldest ones trickling in last instead of the channel spending months working
+  through years-old episodes before ever reaching current ones.
+  `EpisodeStore.get_newest_pending(exclude_sources=...)` rotates fairly across all 3 sources:
   `process_backlog_once` fetches the sources of the last 2 finalized episodes
   (`get_recent_finalized_sources`) and prefers a pending row from a source *not* in that list,
-  falling back to the overall-oldest pending row if every candidate in the oldest-20 window is
+  falling back to the overall-newest pending row if every candidate in the newest-20 window is
   excluded. With only 2 sources, excluding the single last one was enough to force strict
   alternation; with 3 it isn't (excluding just 1 of 3 still lets the same 1 of the other 2 win
-  every time if it happens to always have the older pending row), hence excluding the last 2
+  every time if it happens to always have the newer pending row), hence excluding the last 2
   finalized sources, not just the last 1 -- rotation was originally crossingpodcast/sv101 only,
   expanded to 3-way when Lenny's Podcast was added (see "Third source" below).
 - `daily_cycle()` just runs phase 1 then phase 2; `--loop` repeats `daily_cycle` on a timer.

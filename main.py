@@ -6,9 +6,9 @@ Two coordinated workflows:
         MAX_EPISODES_PER_RUN), marking them 'posted'.
     Phase 2 - historical backlog: each run also queues any not-yet-seen
         archive episodes as 'pending', then processes exactly one
-        oldest-pending episode, marking it 'processed'. This works through a
-        source's entire history gradually (e.g. one per day) instead of
-        transcribing hundreds of old episodes at once.
+        newest-pending episode, marking it 'processed'. This works through a
+        source's entire history gradually (e.g. one per day), newest first,
+        instead of transcribing hundreds of old episodes at once.
 
 Usage:
     python main.py                  # run phase 1 + one phase-2 backlog step, then exit
@@ -201,13 +201,16 @@ def scrape_backlog(settings: Settings) -> int:
 
 def process_backlog_once(settings: Settings) -> bool:
     """Phase 2: ensure the backlog is populated, then process exactly one
-    oldest-pending episode, marking it 'processed'. Returns True if an
+    newest-pending episode, marking it 'processed'. Returns True if an
     episode was processed, False if the backlog is empty or the throttle
     below skipped this invocation.
 
-    Rotates fairly across all 3 sources: picks the oldest pending episode
+    Newest first (not oldest first) so each source's backlog catches up to
+    recent episodes quickly, with the oldest ones trickling in last.
+
+    Rotates fairly across all 3 sources: picks the newest pending episode
     from a source other than either of the last 2 finalized ones (falling
-    back to the oldest pending episode from any source if that excludes
+    back to the newest pending episode from any source if that excludes
     everything), so consecutive backlog runs cycle crossingpodcast/sv101/lenny
     instead of draining one source's entire archive before touching others.
 
@@ -236,12 +239,12 @@ def process_backlog_once(settings: Settings) -> bool:
             return False
 
     recent_sources = store.get_recent_finalized_sources(limit=2)
-    row = store.get_oldest_pending(exclude_sources=recent_sources)
+    row = store.get_newest_pending(exclude_sources=recent_sources)
     if not row:
         logger.info("Backlog is empty: no pending archive episodes to process.")
         return False
 
-    logger.info("[%s] Processing oldest backlog episode: %r", row["id"], row["title"])
+    logger.info("[%s] Processing newest backlog episode: %r", row["id"], row["title"])
     raw_ep = scraper.RawEpisode(
         source=row["source"],
         external_id=row["external_id"],
@@ -273,7 +276,7 @@ def main() -> None:
         "--process-backlog",
         action="store_true",
         help="Only run the phase-2 backlog step: queue any new historical episodes as pending, "
-        "then process exactly one oldest-pending episode, then exit",
+        "then process exactly one newest-pending episode, then exit",
     )
     args = parser.parse_args()
 

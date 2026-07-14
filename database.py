@@ -128,7 +128,7 @@ class EpisodeStore:
         rotation, excluding just the single last source (as with 2 sources)
         isn't enough to keep rotation fair -- excluding the last `limit`
         keeps any one source from being picked twice in a row across a wider
-        window. See get_oldest_pending's exclude_sources."""
+        window. See get_newest_pending's exclude_sources."""
         resp = (
             self.client.table(TABLE)
             .select("source")
@@ -139,18 +139,21 @@ class EpisodeStore:
         )
         return [row["source"] for row in resp.data]
 
-    def get_oldest_pending(self, exclude_sources: Optional[list[str]] = None) -> Optional[dict]:
-        """Return the oldest (by published date) episode still queued as 'pending', or None.
+    def get_newest_pending(self, exclude_sources: Optional[list[str]] = None) -> Optional[dict]:
+        """Return the newest (by published date) episode still queued as 'pending', or None.
 
         Used by backlog processing (phase 2) to work through the historical
-        archive one episode at a time, oldest first. If `exclude_sources` is
-        given, prefer an episode from a source *not* in that list first (so
-        backlog posts rotate fairly between sources run to run instead of one
-        source dominating); falls back to the oldest pending episode from any
-        source if every candidate in the oldest window is excluded, so the
-        backlog never stalls just because some sources ran dry.
+        archive one episode at a time, newest first -- so the channel catches
+        up to each source's recent episodes quickly, with the oldest ones
+        trickling in last (previously the reverse; changed on request).
+        If `exclude_sources` is given, prefer an episode from a source *not*
+        in that list first (so backlog posts rotate fairly between sources
+        run to run instead of one source dominating); falls back to the
+        newest pending episode from any source if every candidate in the
+        newest window is excluded, so the backlog never stalls just because
+        some sources ran dry.
 
-        Picks from a small oldest-first window (20) rather than issuing a
+        Picks from a small newest-first window (20) rather than issuing a
         `not in (...)` query, since which sources should be excluded is a
         short, dynamic, Python-side list (see get_recent_finalized_sources).
         """
@@ -159,7 +162,7 @@ class EpisodeStore:
             self.client.table(TABLE)
             .select("*")
             .eq("status", STATUS_PENDING)
-            .order("published_at", desc=False, nullsfirst=False)
+            .order("published_at", desc=True, nullsfirst=False)
             .limit(20)
             .execute()
         )

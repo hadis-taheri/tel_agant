@@ -40,21 +40,6 @@ logger = logging.getLogger(__name__)
 # waiting it out, at the cost of a slower run for that episode).
 MAX_TRANSCRIPT_BYTES = 25_000
 
-# Direct-to-Persian path (already_english=True in summarize_to_persian_html):
-# used for sources whose transcript is already English (Lenny's Podcast),
-# which skips _translate_to_english entirely and feeds the raw transcript
-# straight into the Persian step below, using SYSTEM_PROMPT directly instead
-# of the much shorter _ENGLISH_BRIDGE_SYSTEM_PROMPT. That's the trap this
-# constant was originally sized without accounting for: SYSTEM_PROMPT itself
-# (the long Persian copywriting/storytelling instructions) costs real prompt
-# tokens on every call, on top of the transcript -- a first production run at
-# 20,000 bytes hit a real `413 ... tokens per minute (TPM): Limit 8000,
-# Requested 8024` from Groq (prompt + the 2,000-token completion reservation
-# together), i.e. the transcript+prompt overhead alone was already ~6,024
-# tokens before completion. 15,000 bytes leaves real headroom instead of
-# sitting 24 tokens over the ceiling.
-DIRECT_ENGLISH_MAX_TRANSCRIPT_BYTES = 15_000
-
 # The model occasionally leaks stray non-Persian script characters (CJK,
 # Cyrillic, Hangul, Kana) into an otherwise Persian output. These ranges
 # catch that so we can retry generation instead of shipping garbled text.
@@ -194,17 +179,17 @@ USER_PROMPT_TEMPLATE = """\
 """
 
 
-def _truncate(transcript: str, byte_budget: int = MAX_TRANSCRIPT_BYTES) -> str:
+def _truncate(transcript: str) -> str:
     encoded = transcript.encode("utf-8")
-    if len(encoded) <= byte_budget:
+    if len(encoded) <= MAX_TRANSCRIPT_BYTES:
         return transcript
     logger.warning(
         "Transcript too long (%d bytes), truncating to %d bytes before sending to the LLM",
-        len(encoded), byte_budget,
+        len(encoded), MAX_TRANSCRIPT_BYTES,
     )
     # Slicing raw UTF-8 bytes can land mid-character; decode with errors="ignore"
     # to drop any incomplete trailing byte sequence instead of raising/corrupting.
-    truncated = encoded[:byte_budget].decode("utf-8", errors="ignore")
+    truncated = encoded[:MAX_TRANSCRIPT_BYTES].decode("utf-8", errors="ignore")
     return truncated + "\n...[transcript truncated]"
 
 
@@ -280,22 +265,14 @@ def _translate_to_english(client: Groq, model: str, transcript: str, episode_tit
     )
 
 
-def summarize_to_persian_html(
-    transcript: str, episode_title: str, groq_api_key: str, model: str, already_english: bool = False
-) -> str:
+def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key: str, model: str) -> str:
     """Return a Telegram-HTML-formatted Persian summary of the transcript.
 
-    Two-step pivot by default: the raw transcript (English or Chinese) is
-    first turned into a detailed English summary (_translate_to_english),
-    then that English summary is rewritten into the final engaging Persian
-    post. See the module docstring for why -- direct Chinese -> long-form
-    Persian proved unreliable for crossingpodcast's dense, mostly-Chinese
-    episodes.
-
-    Pass already_english=True for sources whose transcript is already native
-    English (Lenny's Podcast) to skip the bridge step entirely and translate
-    directly -- there's no foreign-language pivot needed, and skipping it
-    saves an LLM call. See DIRECT_ENGLISH_MAX_TRANSCRIPT_BYTES.
+    Two-step pivot: the raw transcript (English or Chinese) is first turned
+    into a detailed English summary (_translate_to_english), then that
+    English summary is rewritten into the final engaging Persian post. See
+    the module docstring for why -- direct Chinese -> long-form Persian
+    proved unreliable for crossingpodcast's dense, mostly-Chinese episodes.
 
     The Persian step still occasionally leaks stray characters from an
     unrelated script into the output; if that happens we regenerate a couple
@@ -306,10 +283,7 @@ def summarize_to_persian_html(
     episode 'failed' rather than posting broken content).
     """
     client = Groq(api_key=groq_api_key)
-    if already_english:
-        english_bridge = _truncate(transcript, DIRECT_ENGLISH_MAX_TRANSCRIPT_BYTES)
-    else:
-        english_bridge = _translate_to_english(client, model, transcript, episode_title)
+    english_bridge = _translate_to_english(client, model, transcript, episode_title)
     user_prompt = USER_PROMPT_TEMPLATE.format(title=episode_title, transcript=english_bridge)
 
     html = ""

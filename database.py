@@ -110,8 +110,9 @@ class EpisodeStore:
 
     def get_last_finalized(self) -> Optional[dict]:
         """Return {"source", "updated_at"} of the most recently posted/processed
-        episode, or None if none exist yet. Used to throttle how often phase 2
-        does real work (see MIN_BACKLOG_INTERVAL_MINUTES in main.py)."""
+        episode, or None if none exist yet. Used both to alternate sources
+        between backlog runs and to throttle how often phase 2 does real work
+        (see MIN_BACKLOG_INTERVAL_MINUTES in main.py)."""
         resp = (
             self.client.table(TABLE)
             .select("source, updated_at")
@@ -122,57 +123,40 @@ class EpisodeStore:
         )
         return resp.data[0] if resp.data else None
 
-    def get_recent_finalized_sources(self, limit: int = 2) -> list[str]:
-        """Return the sources of the `limit` most-recently posted/processed
-        episodes, most recent first. With 3+ sources sharing one backlog
-        rotation, excluding just the single last source (as with 2 sources)
-        isn't enough to keep rotation fair -- excluding the last `limit`
-        keeps any one source from being picked twice in a row across a wider
-        window. See get_newest_pending's exclude_sources."""
-        resp = (
-            self.client.table(TABLE)
-            .select("source")
-            .in_("status", [STATUS_POSTED, STATUS_PROCESSED])
-            .order("updated_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return [row["source"] for row in resp.data]
-
-    def get_newest_pending(self, exclude_sources: Optional[list[str]] = None) -> Optional[dict]:
+    def get_newest_pending(self, exclude_source: Optional[str] = None) -> Optional[dict]:
         """Return the newest (by published date) episode still queued as 'pending', or None.
 
         Used by backlog processing (phase 2) to work through the historical
         archive one episode at a time, newest first -- so the channel catches
         up to each source's recent episodes quickly, with the oldest ones
-        trickling in last (previously the reverse; changed on request).
-        If `exclude_sources` is given, prefer an episode from a source *not*
-        in that list first (so backlog posts rotate fairly between sources
-        run to run instead of one source dominating); falls back to the
-        newest pending episode from any source if every candidate in the
-        newest window is excluded, so the backlog never stalls just because
-        some sources ran dry.
-
-        Picks from a small newest-first window (20) rather than issuing a
-        `not in (...)` query, since which sources should be excluded is a
-        short, dynamic, Python-side list (see get_recent_finalized_sources).
+        trickling in last (previously the reverse; changed on request). If
+        `exclude_source` is given, prefer an episode from a *different*
+        source first (so backlog posts alternate between sources run to
+        run); falls back to any pending episode if none from another source
+        is queued, so the backlog never stalls just because one source ran dry.
         """
-        exclude_sources = exclude_sources or []
+        if exclude_source:
+            resp = (
+                self.client.table(TABLE)
+                .select("*")
+                .eq("status", STATUS_PENDING)
+                .neq("source", exclude_source)
+                .order("published_at", desc=True, nullsfirst=False)
+                .limit(1)
+                .execute()
+            )
+            if resp.data:
+                return resp.data[0]
+
         resp = (
             self.client.table(TABLE)
             .select("*")
             .eq("status", STATUS_PENDING)
             .order("published_at", desc=True, nullsfirst=False)
-            .limit(20)
+            .limit(1)
             .execute()
         )
-        rows = resp.data
-        if not rows:
-            return None
-        for row in rows:
-            if row["source"] not in exclude_sources:
-                return row
-        return rows[0]
+        return resp.data[0] if resp.data else None
 
     def update(self, episode_id: int, **fields) -> None:
         fields["updated_at"] = datetime.utcnow().isoformat()

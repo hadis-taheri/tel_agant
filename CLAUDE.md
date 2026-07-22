@@ -228,6 +228,29 @@ pulled in a Chinese title/description/cover image via the auto-preview. Image ge
 are currently unused — `main.py` no longer calls `image_generator`, and `telegram_bot.py` no longer
 falls back to a banner. Posts are text-only until/unless that's revisited.
 
+**Every post ends with a source-attribution footer** (in lieu of the link back described above):
+the episode's original title (accurately, literally translated to Persian — not the creative
+headline `SYSTEM_PROMPT` generates for the post body), its episode number if the source embeds one,
+its publish date, and which source (`Crossing Podcast` / `Silicon Valley 101 (SV101)`) it came from.
+The publish date is shown Gregorian (`"YYYY-MM-DD"`, e.g. `2026-07-15`), by request — not Jalali —
+so no new date-conversion dependency was needed. `scraper.format_published_date()` normalizes the
+two sources' different raw formats (crossingpodcast's API gives ISO 8601 with a `Z` suffix; sv101's
+RSS feed gives RFC 822) into that single display format, returning `None` (footer omits the line)
+if `published_at` is missing or neither format parses.
+`summarizer._translate_title_to_persian()` does a small, separate, non-creative LLM call for the
+title translation (cheap relative to the main two-step pivot: short input/output, so it doesn't
+meaningfully touch the per-episode or 200k-tokens/day budgets documented above); on failure it falls
+back to the original untranslated title rather than raising, since a broken footer line isn't worth
+failing an otherwise-good episode over. `scraper.extract_episode_number()` pulls the number from the
+title text itself — sv101 embeds one (`"E244｜..."` on recent episodes, plain `"10: ..."` on older
+ones), crossingpodcast doesn't (its API only exposes an internal db id, not a public episode number),
+so the footer simply omits the number line for crossingpodcast rather than showing something
+misleading. `scraper.strip_episode_number_prefix()` removes that same prefix before the title goes
+to translation, so the number isn't duplicated inside the translated title text.
+`summarizer._finalize()` reserves room for the footer's exact length *before* trimming the main body
+to the Telegram character budget, then appends the footer last — so the footer is never itself
+subject to truncation and the combined body+footer can't push the post over Telegram's hard limit.
+
 ## External accounts this project depends on
 
 Supabase (Postgres), Groq (STT + LLM), and a Telegram bot/channel are real, already-provisioned

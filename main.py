@@ -68,6 +68,10 @@ def _run_pipeline(
             episode_title=raw_ep.title,
             groq_api_key=settings.groq_api_key,
             model=settings.groq_llm_model,
+            source=raw_ep.source,
+            episode_number=scraper.extract_episode_number(raw_ep.title),
+            footer_title=scraper.strip_episode_number_prefix(raw_ep.title),
+            published_date=scraper.format_published_date(raw_ep.published_at),
         )
         store.mark_status(episode_id, database.STATUS_SUMMARIZED, summary_html=summary_html)
 

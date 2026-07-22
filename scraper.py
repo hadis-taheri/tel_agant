@@ -14,7 +14,10 @@ Source 2 - sv101.fireside.fm
     We use feedparser instead of scraping the HTML episode list.
 """
 import logging
+import re
 from dataclasses import dataclass
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import List, Optional
 from urllib.parse import quote
 
@@ -149,6 +152,53 @@ def fetch_sv101_episodes(rss_url: str) -> List[RawEpisode]:
         )
     logger.info("sv101: found %d episodes", len(episodes))
     return episodes
+
+
+# sv101 titles carry a leading episode number ("E244｜..." on recent
+# episodes, plain "10: ..." on older ones); crossingpodcast titles have no
+# such convention at all (its API exposes only an internal db id, e.g.
+# 60001, which isn't a public episode number). Matches both sv101 formats;
+# simply won't match anything on crossingpodcast titles, which is the
+# correct behavior there (no number to show).
+_EPISODE_NUMBER_RE = re.compile(r"^[Ee]?\s*(\d{1,4})\s*[:｜]\s*")
+
+
+def extract_episode_number(title: str) -> Optional[str]:
+    """Return the leading episode number embedded in a title, or None if the
+    source doesn't embed one (see _EPISODE_NUMBER_RE above)."""
+    match = _EPISODE_NUMBER_RE.match(title)
+    return str(int(match.group(1))) if match else None
+
+
+def strip_episode_number_prefix(title: str) -> str:
+    """Remove a leading episode-number prefix (see extract_episode_number),
+    leaving just the descriptive part of the title -- used when the number
+    is going to be displayed separately (e.g. in the post footer) so it
+    isn't duplicated inside the translated title too."""
+    return _EPISODE_NUMBER_RE.sub("", title, count=1).strip()
+
+
+def format_published_date(published_at: Optional[str]) -> Optional[str]:
+    """Normalize a RawEpisode's published_at into a plain "YYYY-MM-DD" date
+    string for display in the post footer.
+
+    The two sources report this in different formats: crossingpodcast's API
+    gives ISO 8601 ("2026-07-12T16:00:00.000Z"), sv101's RSS feed gives RFC
+    822 ("Wed, 15 Jul 2026 17:00:00 -0700") -- tries ISO first, then falls
+    back to RFC 822. Returns None if published_at is missing or neither
+    format parses, so the footer can just omit the date line rather than
+    show something wrong.
+    """
+    if not published_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = parsedate_to_datetime(published_at)
+        except (TypeError, ValueError):
+            return None
+    return dt.strftime("%Y-%m-%d")
 
 
 def fetch_all_episodes(crossingpodcast_api: str, sv101_rss_url: str) -> List[RawEpisode]:

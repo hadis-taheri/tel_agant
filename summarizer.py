@@ -16,6 +16,7 @@ first step in summarize_to_persian_html().
 """
 import logging
 import re
+from typing import Optional
 
 from groq import Groq, APIStatusError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -179,6 +180,83 @@ USER_PROMPT_TEMPLATE = """\
 """
 
 
+# Display names for the source-attribution footer (see _build_footer). Kept
+# as plain literals rather than importing scraper's SOURCE_* constants, to
+# keep summarizer.py's only dependency on episode metadata being the plain
+# strings main.py already passes it -- if these values ever change, keep
+# them in sync with scraper.py's SOURCE_CROSSINGPODCAST/SOURCE_SV101.
+_SOURCE_DISPLAY_NAMES = {
+    "crossingpodcast": "Crossing Podcast",
+    "sv101": "Silicon Valley 101 (SV101)",
+}
+
+# Separate from SYSTEM_PROMPT's creative headline: this is a short, literal,
+# non-creative translation of the episode's *original* title, used only in
+# the footer so readers can identify/search for the source episode. Reuses
+# the same proper-noun rule as the main prompt (see incident notes there).
+_TITLE_TRANSLATE_SYSTEM_PROMPT = """\
+تو یک مترجم دقیق فارسی هستی. عنوان اصلی یک اپیزود پادکست (به انگلیسی یا چینی) به تو داده می‌شود.
+آن را به‌طور دقیق، وفادار و بدون خلاقیت یا بازنویسی به فارسی ترجمه کن -- این یک عنوان جذاب
+تبلیغاتی نیست، بلکه ترجمه‌ی مرجع همان عنوان اصلی است. **اسم‌های خاص** -- نام شرکت‌ها، محصولات،
+ابزارها، افراد، و نام‌های معروف مکان‌ها/نهادهای مالی-اقتصادی (مثل OpenAI, Tesla, Elon Musk,
+Wall Street) -- را هرگز ترجمه یا فارسی‌نویسی نکن؛ دقیقاً همان‌طور که هستند به انگلیسی/لاتین
+نگه‌دار. فقط و فقط ترجمه‌ی نهایی را برگردان: بدون گیومه، بدون توضیح اضافه، بدون مقدمه.
+"""
+
+
+def _translate_title_to_persian(client: Groq, model: str, title: str) -> str:
+    """Accurate, literal Persian translation of the episode's original title,
+    for the source-attribution footer -- unrelated to the catchy headline
+    summarize_to_persian_html's main step generates for the post body.
+
+    Low-stakes compared to the main summary: if the model can't produce a
+    clean Persian translation after retrying, fall back to the original
+    (untranslated) title rather than failing the whole episode over a
+    footer line -- the episode summary itself is unaffected either way.
+    """
+    translated = title
+    for attempt in range(1, GENERATION_ATTEMPTS + 1):
+        translated = _generate_once(
+            client, model, _TITLE_TRANSLATE_SYSTEM_PROMPT, title, temperature=0.2, max_tokens=150
+        )
+        if not _FOREIGN_SCRIPT_RE.search(translated):
+            return translated
+        logger.warning(
+            "Title translation contained stray non-Persian script (attempt %d/%d); regenerating",
+            attempt, GENERATION_ATTEMPTS,
+        )
+
+    ratio = _foreign_script_ratio(translated)
+    if ratio > _MAX_FOREIGN_SCRIPT_RATIO:
+        logger.warning(
+            "Title translation stayed mostly non-Persian after %d attempts; using original title untranslated",
+            GENERATION_ATTEMPTS,
+        )
+        return title
+    return _FOREIGN_SCRIPT_RE.sub(" ", translated).strip()
+
+
+def _build_footer(
+    persian_title: str,
+    episode_number: Optional[str],
+    source: str,
+    published_date: Optional[str] = None,
+) -> str:
+    """Plain-text (well, Telegram-HTML) footer appended to every post:
+    the episode's title (accurately translated to Persian), its number
+    (when the source embeds one -- see scraper.extract_episode_number),
+    its publish date (Gregorian, "YYYY-MM-DD" -- see
+    scraper.format_published_date), and which source it came from."""
+    display_source = _SOURCE_DISPLAY_NAMES.get(source, source)
+    lines = [f"<b>عنوان اپیزود:</b> {persian_title}"]
+    if episode_number:
+        lines.append(f"<b>شماره اپیزود:</b> {episode_number}")
+    if published_date:
+        lines.append(f"<b>تاریخ انتشار:</b> {published_date}")
+    lines.append(f"<b>منبع:</b> {display_source}")
+    return "\n".join(lines)
+
+
 def _truncate(transcript: str) -> str:
     encoded = transcript.encode("utf-8")
     if len(encoded) <= MAX_TRANSCRIPT_BYTES:
@@ -265,8 +343,20 @@ def _translate_to_english(client: Groq, model: str, transcript: str, episode_tit
     )
 
 
-def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key: str, model: str) -> str:
-    """Return a Telegram-HTML-formatted Persian summary of the transcript.
+def summarize_to_persian_html(
+    transcript: str,
+    episode_title: str,
+    groq_api_key: str,
+    model: str,
+    source: str,
+    episode_number: Optional[str] = None,
+    footer_title: Optional[str] = None,
+    published_date: Optional[str] = None,
+) -> str:
+    """Return a Telegram-HTML-formatted Persian summary of the transcript,
+    ending in a source-attribution footer (episode title in Persian, its
+    number if the source has one, its publish date, and which source it's
+    from).
 
     Two-step pivot: the raw transcript (English or Chinese) is first turned
     into a detailed English summary (_translate_to_english), then that
@@ -281,16 +371,24 @@ def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key:
     responds mostly in the source language, stripping would ship a
     near-empty, unreadable message, so we raise instead (the caller marks the
     episode 'failed' rather than posting broken content).
+
+    `footer_title` should be the episode title with any leading episode-number
+    prefix already stripped (see scraper.strip_episode_number_prefix) so the
+    number isn't duplicated inside the translated title; defaults to
+    `episode_title` if not given.
     """
     client = Groq(api_key=groq_api_key)
     english_bridge = _translate_to_english(client, model, transcript, episode_title)
     user_prompt = USER_PROMPT_TEMPLATE.format(title=episode_title, transcript=english_bridge)
 
+    persian_title = _translate_title_to_persian(client, model, footer_title or episode_title)
+    footer = _build_footer(persian_title, episode_number, source, published_date)
+
     html = ""
     for attempt in range(1, GENERATION_ATTEMPTS + 1):
         html = _generate_once(client, model, SYSTEM_PROMPT, user_prompt, temperature=0.3, max_tokens=2000)
         if not _FOREIGN_SCRIPT_RE.search(html):
-            return _finalize(html)
+            return _finalize(html, footer)
         logger.warning(
             "LLM output contained stray non-Persian script characters (attempt %d/%d); regenerating",
             attempt, GENERATION_ATTEMPTS,
@@ -305,11 +403,19 @@ def summarize_to_persian_html(transcript: str, episode_title: str, groq_api_key:
 
     logger.warning("Stray non-Persian characters persisted after %d attempts; stripping them", GENERATION_ATTEMPTS)
     html = _FOREIGN_SCRIPT_RE.sub(" ", html)
-    return _finalize(_collapse_whitespace(html))
+    return _finalize(_collapse_whitespace(html), footer)
 
 
-def _finalize(html: str) -> str:
-    return _force_rtl_paragraphs(_fit_to_text_limit(_sanitize_html(html)))
+def _finalize(html: str, footer: str = "") -> str:
+    # Reserve room for the footer up front, so trimming the body to the
+    # Telegram char budget (_fit_to_text_limit) can never push the combined
+    # body+footer text over the hard limit -- the footer is always appended
+    # last and is never itself subject to trimming.
+    reserved = len(footer) + 2 if footer else 0  # +2 for the blank-line separator
+    limit = TELEGRAM_TEXT_MAX_LEN - _TEXT_SAFETY_MARGIN - reserved
+    body = _fit_to_text_limit(_sanitize_html(html), limit)
+    combined = f"{body}\n\n{footer}" if footer else body
+    return _force_rtl_paragraphs(combined)
 
 
 # Unicode RIGHT-TO-LEFT MARK: a zero-width character with strong RTL
@@ -332,11 +438,12 @@ def _force_rtl_paragraphs(html: str) -> str:
     return "\n\n".join(p if not p or p.startswith(_RLM) else _RLM + p for p in paragraphs)
 
 
-def _fit_to_text_limit(html: str) -> str:
+def _fit_to_text_limit(html: str, limit: int) -> str:
     """Trim on a clean boundary if the model ignored the ~3400-3700-char
     instruction, so the post still fits as a single Telegram text message
-    (Telegram's hard 4096-char limit) instead of failing to send."""
-    limit = TELEGRAM_TEXT_MAX_LEN - _TEXT_SAFETY_MARGIN
+    (Telegram's hard 4096-char limit) instead of failing to send. `limit`
+    is passed in by _finalize, which reserves extra room out of the
+    Telegram budget for the footer appended after this trim."""
     if len(html) <= limit:
         return html
 

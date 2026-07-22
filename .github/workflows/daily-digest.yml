@@ -10,18 +10,9 @@ name: Subscriber daily digest
 # catch-up logic make extra/missed firings harmless -- a dropped tick just
 # means a subscriber's digest arrives a bit later the same day, not that it
 # never arrives.
-#
-# `schedule` is commented out on purpose: the interactive half of this
-# feature (serverless-bot/) isn't deployed yet -- Telegram Serverless isn't
-# available on this bot's BotFather yet (no "Serverless" menu item as of
-# 2026-07-19, likely a gradual rollout). Until it's deployed, `subscribers`
-# has no rows, so a live schedule would just poll for nothing every 15
-# minutes -- harmless, but pointless. Uncomment the schedule line (and
-# remove this paragraph) once serverless-bot/ is pushed and people can
-# actually subscribe.
 on:
-  # schedule:
-  #   - cron: "7,22,37,52 * * * *"
+  schedule:
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch: {} # allows manually triggering a run from the Actions tab (safe to test any time)
 
 jobs:

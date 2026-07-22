@@ -1,0 +1,48 @@
+name: Subscriber daily digest
+
+# Separate workflow from daily-post.yml on purpose -- this is a standalone
+# add-on feature (see digest.py / subscribers_schema.sql) that must not
+# affect the core podcast pipeline's schedule or failure behavior in any way.
+#
+# Same "fire 4x/hour" mitigation as daily-post.yml, for the same reason:
+# GitHub's `schedule` trigger has no SLA and can silently drop a tick.
+# digest.py's own per-day dedup (last_sent_date) plus the alarm_hour<=now
+# catch-up logic make extra/missed firings harmless -- a dropped tick just
+# means a subscriber's digest arrives a bit later the same day, not that it
+# never arrives.
+#
+# `schedule` is commented out on purpose: the interactive half of this
+# feature (serverless-bot/) isn't deployed yet -- Telegram Serverless isn't
+# available on this bot's BotFather yet (no "Serverless" menu item as of
+# 2026-07-19, likely a gradual rollout). Until it's deployed, `subscribers`
+# has no rows, so a live schedule would just poll for nothing every 15
+# minutes -- harmless, but pointless. Uncomment the schedule line (and
+# remove this paragraph) once serverless-bot/ is pushed and people can
+# actually subscribe.
+on:
+  # schedule:
+  #   - cron: "7,22,37,52 * * * *"
+  workflow_dispatch: {} # allows manually triggering a run from the Actions tab (safe to test any time)
+
+jobs:
+  send-digests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send due digests
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python digest.py

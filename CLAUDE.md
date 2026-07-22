@@ -275,3 +275,65 @@ meaning it's IP-reputation-based, not a transient rate limit or a UA fingerprint
 re-adding a Substack-hosted (or any Cloudflare-fronted) source, test the actual audio *download*
 specifically from a GitHub Actions run, not just from a dev machine -- discovery/RSS endpoints
 being reachable does not mean the CDN-hosted audio file will be.
+
+## Subscriber daily-digest (standalone add-on, currently dormant)
+
+A second, independent feature: a user sets an alarm hour (Tehran time) via an interactive bot menu,
+and once a day at that hour gets every episode summary posted to the channel in the last 24h, sent
+to them in their private chat. Deliberately isolated from the core pipeline above -- it reads from
+`episodes` but nothing in `main.py`/`scraper.py`/etc. knows this feature exists, so it can be fully
+removed (drop the `subscribers` table, delete `digest.py`, `serverless-bot/`, and
+`.github/workflows/daily-digest.yml`) without touching anything else. See `subscribers_schema.sql`'s
+header for the exact removal steps.
+
+**Two halves, two different runtimes**:
+- `digest.py` -- the sender. Plain Python, runs via its own GitHub Actions workflow
+  (`daily-digest.yml`, same 4x/hour cron-reliability pattern as `daily-post.yml`, fully separate so a
+  failure here can't affect the podcast pipeline's schedule). Reads due subscribers from Supabase,
+  reuses `telegram_bot.send_summary()` (only one-way dependency on the existing codebase) to deliver.
+- `serverless-bot/` -- the interactive half (`/start`, alarm-hour menu, `/stop`), meant to run on
+  **Telegram Serverless** (`core.telegram.org/bots/serverless`, JavaScript, no server to host). It's
+  the *same* bot as the channel (same token) -- confirmed safe: the bot's webhook (serverless side)
+  only ever replies to the chat_id of whoever messaged it (Telegram supplies this server-side, not
+  spoofable by the user), and never touches the channel-posting code path at all, so there's no
+  cross-talk between "a user clicked a button" and "something gets posted to the channel."
+
+**Not deployed as of 2026-07-19**: Telegram Serverless has no "Serverless" menu item on this bot's
+BotFather yet (checked both the bot's main menu and Bot Settings submenu) -- most likely a gradual
+platform rollout that hasn't reached this account/bot. `npx tgcloud login` (the one-time step that
+links a project to a bot and can't be scripted around) also turned out to need two things not
+obvious from the docs: it hard-requires an interactive terminal (fails immediately in any
+programmatic/non-TTY shell, i.e. an agent can't run it), and its non-interactive escape hatch
+(`TGCLOUD_TOKEN` env var) is **not** the Telegram bot token -- it's a separate `app<id>:<secret>`
+CLI Access token that BotFather issues once Serverless is turned on for that bot, which is exactly
+the menu item that's missing. Until Serverless appears in BotFather, this half can't be deployed at
+all. `subscribers` has zero rows either way, so leaving the digest workflow's schedule enabled with
+nothing to send is harmless (confirmed: public repo, so GitHub Actions minutes are unlimited here
+regardless -- see below).
+
+**RLS gap found and fixed while testing the `anon` key**: `episodes` (the core pipeline's table)
+never had row-level security enabled -- harmless as long as only `service_role` (server-side,
+bypasses RLS) was ever used, which was true until this feature introduced an `anon` key embedded in
+public-ish JS bot code. Confirmed directly: before enabling RLS, the anon key could fetch real rows
+from `episodes` (including raw transcripts and not-yet-posted/failed episodes, not just what's
+already public in the channel); after `alter table episodes enable row level security;` with zero
+policies added, the same request returns nothing. See `subscribers_schema.sql` for the fix -- if you
+ever add another feature that needs its own low-privilege Supabase key, check this table's RLS state
+again rather than assuming it's still open the old (pre-digest-feature) way.
+
+**Tehran time uses a fixed UTC+03:30 offset, not `zoneinfo.ZoneInfo("Asia/Tehran")`**: Iran has no
+DST, so the offset never changes, and a fixed `timezone(timedelta(hours=3, minutes=30))` needs zero
+external data. This sidesteps a real portability trap: Python's `zoneinfo` has no bundled IANA tz
+database on Windows (and on some slim Linux images) -- `ZoneInfo("Asia/Tehran")` raises
+`ZoneInfoNotFoundError` unless the `tzdata` PyPI package is installed, which would have meant either
+adding a new shared `requirements.txt` entry (breaking this feature's "touches nothing else"
+isolation) or risking it silently working in CI (Ubuntu, usually has system tzdata) but crashing on
+a contributor's Windows machine. Confirmed by hitting the crash locally before switching to a fixed
+offset.
+
+**GitHub Actions minutes are unlimited for this repo specifically because it's public**: confirmed
+against the GitHub API (`private: false`). The well-known 2,000-minutes/month free-tier cap only
+applies to private repositories, and is shared across all of an account's private repos -- it has
+nothing to do with usage on this repo, and running `daily-digest.yml` every 15 minutes indefinitely
+(even while `subscribers` is empty) costs nothing. Re-check this if the repo (or any other repo
+sharing the account's Actions quota) is ever made private.

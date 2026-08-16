@@ -3,7 +3,7 @@ import asyncio
 import logging
 from typing import List, Optional
 
-from telegram import Bot
+from telegram import Bot, LinkPreviewOptions
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter, TimedOut, TelegramError
 
@@ -81,3 +81,43 @@ async def send_summary_async(bot_token: str, channel_id: str, summary_html: str)
 def send_summary(bot_token: str, channel_id: str, summary_html: str) -> Optional[int]:
     """Synchronous wrapper around the async Telegram send call."""
     return asyncio.run(send_summary_async(bot_token, channel_id, summary_html))
+
+
+# --- yt_relay add-on: link-preview / photo-caption posts -------------------
+#
+# Used only by yt_relay/ (see CLAUDE.md), never by the podcast pipeline
+# above. Both reuse _send_with_retry so a 429/timeout is handled the same
+# way as every other send in this module.
+
+async def send_link_post_async(bot_token: str, channel_id: str, text: str, preview_url: str) -> Optional[int]:
+    """Post `text` as a single message whose link preview card is pinned to
+    `preview_url` and rendered large, above the text -- gives a clickable
+    video thumbnail without downloading/uploading the video itself (see
+    CLAUDE.md section 5.1)."""
+    bot = Bot(token=bot_token)
+    link_preview = LinkPreviewOptions(url=preview_url, prefer_large_media=True, show_above_text=True)
+    message_id = await _send_with_retry(
+        lambda: bot.send_message(
+            chat_id=channel_id, text=text, parse_mode=ParseMode.HTML, link_preview_options=link_preview
+        )
+    )
+    return message_id
+
+
+def send_link_post(bot_token: str, channel_id: str, text: str, preview_url: str) -> Optional[int]:
+    return asyncio.run(send_link_post_async(bot_token, channel_id, text, preview_url))
+
+
+async def send_photo_post_async(bot_token: str, channel_id: str, photo_url: str, caption: str) -> Optional[int]:
+    """Post `photo_url` (e.g. a YouTube thumbnail) as a photo with `caption`
+    as its HTML caption. The photo itself isn't clickable through to the
+    video -- the caption's own link is (see CLAUDE.md section 5.1)."""
+    bot = Bot(token=bot_token)
+    message_id = await _send_with_retry(
+        lambda: bot.send_photo(chat_id=channel_id, photo=photo_url, caption=caption, parse_mode=ParseMode.HTML)
+    )
+    return message_id
+
+
+def send_photo_post(bot_token: str, channel_id: str, photo_url: str, caption: str) -> Optional[int]:
+    return asyncio.run(send_photo_post_async(bot_token, channel_id, photo_url, caption))

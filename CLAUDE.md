@@ -360,3 +360,122 @@ applies to private repositories, and is shared across all of an account's privat
 nothing to do with usage on this repo, and running `daily-digest.yml` every 15 minutes indefinitely
 (even while `subscribers` is empty) costs nothing. Re-check this if the repo (or any other repo
 sharing the account's Actions quota) is ever made private.
+
+## YouTube -> Telegram relay (standalone add-on)
+
+A third, independent feature: monitors a list of YouTube channels, and for each new long-form video
+posts a Persian-language link post (headline + summary + takeaways, generated from the video's
+title/description only -- no transcript) to a **separate** Telegram channel from the podcast one.
+Adapted from `youtube-telegram-relay-spec.md`, which was written for a different (TypeScript/pnpm)
+monorepo that doesn't exist in this repo -- ported to Python and this repo's existing
+Supabase/Groq/Telegram/GitHub Actions stack instead of introducing a second language/toolchain.
+Deliberately isolated like the digest feature above: nothing in `main.py`/`scraper.py`/
+`summarizer.py`/`database.py`/`config.py` knows this feature exists. The only two imports this
+package makes into the rest of the repo are `telegram_bot.py` (its new `send_link_post`/
+`send_photo_post` functions) and `summarizer._generate_once` (the hardened Groq call wrapper --
+reused so this feature doesn't have to re-solve the Qwen `reasoning_effort`/429-retry issues already
+fixed there). To remove the feature entirely: drop the `yt_channels`/`yt_queue` tables, delete the
+`yt_relay/` package, delete `.github/workflows/yt-relay.yml`, and remove the two `send_*_post`
+functions from `telegram_bot.py`.
+
+**Two-stage pipeline, one Groq call per video, no transcript**: `yt_relay/discover.py` (stage A)
+fetches each active channel's Atom feed, queues new videos, then captions a bounded batch of pending
+rows with a single Groq call each (title + cleaned description in, structured JSON out --
+`yt_relay/caption.py`). `yt_relay/publish.py` (stage B) posts exactly one `ready` row per invocation.
+This is not a multi-agent or tool-calling system -- every video's path through the pipeline is fixed
+and deterministic (feed -> deterministic cleanup -> one LLM call -> render -> send); the LLM is used
+exactly once per video, purely as a text generator with a validated JSON contract, never as a
+decision-maker over what to do next.
+
+**Long-form filtering is a URL prefix swap, not an API call**: `yt_relay/feed.py` fetches
+`https://www.youtube.com/feeds/videos.xml?playlist_id=UULF{channel_id[2:]}` -- YouTube's own
+"uploads minus Shorts" virtual playlist -- instead of the plain per-channel feed. The feed carries no
+duration field, so this is the only reliable way to exclude Shorts without a paid/quota-limited API
+call. Parsed with the standard library's `xml.etree.ElementTree` against explicit Atom/yt/media
+namespaces, not `feedparser` (already a dependency, used by the podcast pipeline) -- `feedparser`
+doesn't reliably surface `media:group > media:description`, which is the one field this whole
+feature depends on for caption input.
+
+**Channel identity is the same "extract once, store forever" pattern as podcast episode dedup**:
+`yt_relay/channels.py` resolves a `@handle` (or full URL) to its `UC...` channel id once, by scraping
+the channel page for `<meta itemprop="channelId">`, then the canonical `<link>`, then a raw
+`"channelId":"UC..."` occurrence in the page's embedded JSON, in that order -- a handle can be
+changed by its owner, the channel id never can. `yt_queue.video_id` carries a database-level unique
+index (mirrors `episodes`' `unique (source, external_id)`), not just an in-code `is_known()` check.
+
+**Seeding, and why re-running the same channel-list file is safe**: adding a channel marks its
+current feed window (up to ~15 videos) as `seeded` rather than `pending`, exactly like the podcast
+pipeline's own seeding step -- without it, the first run on a freshly-added channel would post its
+entire recent history at once. `yt_relay/channels.py add_channel()` is a no-op if the channel is
+already registered, and deliberately does **not** re-seed on a repeat call: re-seeding an existing
+channel would silently mark videos published between the two runs as `seeded`, and they would then
+never be posted. This makes `python -m yt_relay add-channels <file>` safe to re-run on the same list
+repeatedly (e.g. after adding a few new lines) -- already-registered channels are simply skipped.
+
+**A full 10-30 channel list breaks the spec's implicit "low-volume queue" assumption**: a single
+active tech channel posts roughly 2-3 videos/week, so 30 channels can produce on the order of 10-11
+videos/day -- well above a `MAX_POSTS_PER_DAY` sized for a handful of channels. With the queue
+chronically fuller than it can drain, three problems the original spec doesn't address show up in
+practice, and are handled explicitly:
+  - **Staleness must be re-checked at publish time, not just at discovery time.** A `ready` row can
+    sit queued for days once the queue is chronically backed up; `publish.py` re-applies
+    `MAX_AGE_HOURS` immediately before picking a row and skips (`skip_reason='stale'`) anything too
+    old, rather than posting a days-old video as if it were fresh.
+  - **Newest-`ready`-first, not oldest-first.** With a backed-up queue, "oldest ready row" would mean
+    the channel perpetually shows videos from days ago while today's videos rot at the back of the
+    queue. `YtStore.next_ready()` picks the newest by `published_at` -- the same reasoning and the
+    same fix already applied to the podcast pipeline's own backlog (`get_newest_pending` in
+    `database.py`).
+  - **Channel rotation.** `next_ready(exclude_channel=...)` prefers a row from a channel other than
+    whichever channel's video was posted last (falling back to any `ready` row if that channel's
+    queue is empty), so one high-output channel can't monopolize the day's post budget -- directly
+    mirrors `get_newest_pending(exclude_source=...)` in `database.py`.
+  - **LLM spend backpressure.** `discover.py`'s captioning step is gated by `YT_READY_QUEUE_MAX`: if
+    the `ready` queue already holds that many rows, captioning is skipped for the run (rows stay
+    `pending`) rather than spending a Groq call on a video likely to go stale before it's ever
+    posted. Discovery/queueing itself is never gated (it costs no LLM tokens) -- only the captioning
+    step is, the same split as `scrape_backlog` vs. the throttled `_run_pipeline` call in `main.py`.
+
+  `MAX_POSTS_PER_DAY` is set to 8 (not the spec's 6) specifically for this channel-count range, paired
+  with `MIN_HOURS_BETWEEN_POSTS=3` so the two limits agree (3h spacing already implies ~8 posts/day)
+  rather than one silently overriding the other.
+
+**Post format deliberately isn't the spec's plain-bullet template**: the user supplied a real example
+post from a similar Persian channel and asked for that visual style instead --
+`yt_relay/render.py` produces a bold headline, then the summary and takeaways collapsed into a
+`<blockquote expandable>` (Bot API 7+; the channel stays scannable while scrolling, expands on tap),
+then a channel-name/link line, with **no promotional footer** (the example post's own footer of
+social links was explicitly excluded -- that was the point of the request). `render.py` itself stays
+agnostic to which delivery path is used and is kept under a 900-char budget (below Telegram's
+1024-char photo-caption cap) so the choice below stays cheap to change later.
+
+**`YT_POST_STYLE=photo`, decided in milestone M3 against two real posts in the actual test
+channel** (not from description -- see CLAUDE.md's general delivery-note style above for why this
+matters): `send_link_post` (`preview`) was tried first and technically worked (clickable cover,
+opens in Telegram's built-in player), but Telegram's own link-preview card renders a "YouTube"
+label plus **the video's own English title and description** above the thumbnail (confirmed
+directly: a post for an Alexandr Wang video showed `Alexandr Wang: "This is a Once-in-a-Civilization
+Opportunity" / Alexandr Wang's advice to his 18-year-old self: develop your own internal compass...`
+in English, sourced from YouTube's OpenGraph metadata, not from anything this codebase generates or
+controls). That's a real cost in a channel meant to be fully Persian. `send_photo_post` (`photo`) was
+posted right after for the same comparison and has none of that -- just the bare thumbnail image and
+the Persian caption below it, no card, no English text, not clickable-to-play. `photo` was chosen for
+exactly that reason. If clickability ever matters more than staying fully Persian, `preview` is a
+one-line env var change, not a code change -- that's the whole point of keeping `render.py` agnostic
+to which path sends it.
+
+**What was explicitly not built: uploading the video file itself.** The user's reference post
+example was an *uploaded* video (79.6 MB / 120.1 MB, playable inline) -- not a link. Bot API's
+standard `sendVideo` caps out at 50 MB, well under those file sizes, and the spec itself locks "no
+downloading or uploading the video" as a decision in its own section 1. Both the working link-preview
+approach (clickable cover, opens in Telegram's built-in player, no size limit since nothing is
+uploaded) and the file-upload approach the reference post actually used were evaluated; only the
+former is buildable within Bot API's normal limits.
+
+**Out of scope, same as the spec's own section 12 (future work), not attempted here**: transcript-
+based captions (would need a translation firewall so raw English/foreign transcript text never
+reaches the Persian-writing prompt directly, mirroring the podcast pipeline's own two-step pivot),
+`views_per_day` scoring to pick the best video when several are queued at once (the `views` field is
+already captured and stored per video specifically so this is a later `order by` change, not a schema
+migration), Reels-script conversion, and an optional human-approval gate via inline buttons in a
+private channel.

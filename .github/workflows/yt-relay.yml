@@ -1,0 +1,55 @@
+name: yt-relay
+
+# GitHub's schedule trigger has been directly confirmed unreliable for this
+# repo (see CLAUDE.md's note under daily-post.yml -- only 2/10 expected
+# hourly runs fired in one measured window). Firing twice an hour instead of
+# once every two hours (as the original spec suggested) means a single
+# dropped tick doesn't cost a whole cycle of silence. The real publish
+# rhythm is enforced in code (MIN_HOURS_BETWEEN_POSTS in publish.py), not
+# here, so extra runs landing in the same window are harmless: each video is
+# only ever captioned once (video_id is unique), and publish.py exits
+# without doing anything if it's too soon since the last post.
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: yt-relay
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      YT_TELEGRAM_CHANNEL_ID: ${{ secrets.YT_TELEGRAM_CHANNEL_ID }}
+      YT_RELAY_ENABLED: "true"
+      YT_RELAY_DRY_RUN: "true"
+      MAX_AGE_HOURS: "48"
+      MAX_POSTS_PER_DAY: "8"
+      MIN_HOURS_BETWEEN_POSTS: "3"
+      YT_MAX_CAPTIONS_PER_RUN: "3"
+      YT_READY_QUEUE_MAX: "8"
+      YT_POST_STYLE: "photo"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Discover new videos and caption a batch
+        run: python -m yt_relay discover
+
+      - name: Publish one ready video, if the guards allow it
+        run: python -m yt_relay publish

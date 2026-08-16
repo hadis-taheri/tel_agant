@@ -482,6 +482,51 @@ exactly that reason. If clickability ever matters more than staying fully Persia
 one-line env var change, not a code change -- that's the whole point of keeping `render.py` agnostic
 to which path sends it.
 
+**Channel list management: a polling-based Telegram admin bot (`yt_relay/admin_bot.py`), not a raw
+Supabase table edit or a new web panel.** The user wanted a self-service way to add/remove channels
+without running CLI commands or asking Claude every time. A raw Supabase Table Editor insert into
+`yt_channels` was considered and rejected: it silently bypasses seeding (nothing else in the codebase
+calls `mark_channel_seeded()` except `channels.add_channel()`), so a channel added that way would
+have `seeded_at` permanently `NULL` and every future `discover` run would mark *all* of its fetched
+videos `seeded` forever -- the channel would look registered and error-free but never produce a
+single post, with no indication anything was wrong. A full hosted admin web app was also rejected as
+disproportionate scope for "add/remove one row." Telegram Serverless (real-time, webhook-style) is
+still not available on this bot's BotFather account (see the digest feature's notes above) so a live
+chat-bot in the usual sense isn't buildable -- `admin_bot.py` instead polls Telegram's plain
+`getUpdates` HTTP API from its own tighter cron (`.github/workflows/yt-relay-admin-bot.yml`, every 5
+minutes, separate from `yt-relay.yml`'s 30-minute discover/publish cycle since responsiveness matters
+more here and polling costs nothing -- no Groq calls at all).
+
+**Security: only `settings.admin_chat_id` (`YT_RELAY_ADMIN_CHAT_ID`) is ever acted on.** This bot is
+the *same* bot that posts the podcast channel -- it's discoverable/public, so without an allow-list
+check, anyone who DMs it could add or remove channels from this feature's list. Every update's
+`chat.id` is checked against `admin_chat_id` before anything else happens; non-matching chats are
+logged and silently ignored (no reply, to avoid confirming the bot even understood the message).
+Found the real chat_id for this deployment by having the user message the bot once, then reading it
+straight off `GET https://api.telegram.org/bot<token>/getUpdates` -- documented as the lookup method
+in `.env.example` for future re-deployment.
+
+**State across stateless runs lives in the `yt_admin_state` singleton table** (`id` pinned to 1 via a
+check constraint -- see `yt_relay_admin_schema.sql`): `last_update_id` (so `getUpdates` isn't replayed
+from scratch every run -- each GitHub Actions job is a fresh process with no memory of the last one)
+and `pending_action` (whether the admin pressed "🗑 حذف کانال" and the bot is waiting for the next
+message to be the removal target, vs. the default add-on-any-text behavior). The seed row's
+`last_update_id` was set to the update_id of a stale `/start` test message already sitting in the
+bot's queue at table-creation time (found via the same `getUpdates` call used to discover the admin
+chat_id), so the first real poll doesn't replay that old message as a bogus channel-add attempt.
+"Remove" resolves through the same `channels.resolve_channel_id()` used for adding (handle/URL/raw
+id, consent-cookie fix included) rather than a raw text match against the stored `handle` column, so
+it accepts whatever format the admin happens to paste; it deactivates (`is_active = false`), matching
+the existing `toggle-channel` CLI command's semantics, never hard-deletes -- reversible by pressing
+"➕ افزودن کانال" and sending the same link again, which reactivates rather than re-seeding (see
+`channels.add_channel()`'s already-registered path).
+
+Confirmed working end-to-end with real Telegram messages and a real channel (`@mkbhd`): `/start` ->
+keyboard appears -> "📋 لیست کانال‌ها" correctly listed the 3 test channels as inactive -> "➕ افزودن
+کانال" -> `@mkbhd` -> registered and seeded 15 videos -> "🗑 حذف کانال" -> `@mkbhd` -> deactivated,
+each step polled and processed via `python -m yt_relay admin-bot-poll` exactly as the scheduled
+workflow runs it.
+
 **What was explicitly not built: uploading the video file itself.** The user's reference post
 example was an *uploaded* video (79.6 MB / 120.1 MB, playable inline) -- not a link. Bot API's
 standard `sendVideo` caps out at 50 MB, well under those file sizes, and the spec itself locks "no

@@ -8,7 +8,7 @@ import argparse
 import logging
 import sys
 
-from . import channels, discover as discover_mod, publish as publish_mod
+from . import admin_bot, channels, discover as discover_mod, publish as publish_mod
 from .settings import load_settings
 from .store import YtStore
 
@@ -81,6 +81,12 @@ def cmd_publish(_args: argparse.Namespace) -> None:
     publish_mod.run_publish(settings)
 
 
+def cmd_admin_bot_poll(_args: argparse.Namespace) -> None:
+    settings = load_settings()
+    store = YtStore(settings.supabase_url, settings.supabase_key)
+    admin_bot.poll_once(settings, store)
+
+
 def cmd_status(_args: argparse.Namespace) -> None:
     settings = load_settings()
     store = YtStore(settings.supabase_url, settings.supabase_key)
@@ -122,6 +128,9 @@ def main() -> None:
 
     p = sub.add_parser("publish", help="Stage B: publish one 'ready' video, if the guards allow it")
     p.set_defaults(func=cmd_publish)
+
+    p = sub.add_parser("admin-bot-poll", help="Process any new Telegram messages from the admin chat")
+    p.set_defaults(func=cmd_admin_bot_poll)
 
     p = sub.add_parser("status", help="Text dashboard: queue counts, today's posts, recent errors")
     p.set_defaults(func=cmd_status)

@@ -9,6 +9,7 @@ Same pattern as digest.py's own _require_env().
 """
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -32,6 +33,11 @@ class YtSettings:
 
     telegram_bot_token: str
     telegram_channel_id: str
+    # Only this Telegram chat's messages are ever acted on by admin_bot.py --
+    # the bot is public (it also posts the podcast channel), so without this
+    # allow-list check anyone who DMs it could add/remove yt_channels rows.
+    # None (unset) disables the admin bot entirely. See yt_relay_admin_schema.sql.
+    admin_chat_id: Optional[int]
 
     enabled: bool
     dry_run: bool
@@ -61,6 +67,7 @@ def load_settings() -> YtSettings:
         groq_llm_model=os.getenv("GROQ_LLM_MODEL", "qwen/qwen3.6-27b"),
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         telegram_channel_id=_require("YT_TELEGRAM_CHANNEL_ID"),
+        admin_chat_id=int(os.environ["YT_RELAY_ADMIN_CHAT_ID"]) if os.getenv("YT_RELAY_ADMIN_CHAT_ID") else None,
         enabled=os.getenv("YT_RELAY_ENABLED", "true").lower() == "true",
         dry_run=os.getenv("YT_RELAY_DRY_RUN", "true").lower() == "true",
         post_style=os.getenv("YT_POST_STYLE", "photo"),

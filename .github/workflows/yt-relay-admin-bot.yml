@@ -1,0 +1,52 @@
+name: yt-relay-admin-bot
+
+# Polling-based admin bot (see yt_relay/admin_bot.py) -- Telegram Serverless
+# isn't available on this account's BotFather yet (see CLAUDE.md's
+# digest-feature notes), so there's no real-time webhook option. This runs
+# on its own tighter cron rather than piggybacking on yt-relay.yml's
+# 30-minute discover/publish cycle, since responsiveness matters more for a
+# chat interaction than for the batch pipeline -- and polling itself is
+# nearly free (no Groq calls at all, just a couple of lightweight
+# Telegram/Supabase HTTP calls), so running it more often costs nothing.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: yt-relay-admin-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      YT_TELEGRAM_CHANNEL_ID: ${{ secrets.YT_TELEGRAM_CHANNEL_ID }}
+      YT_RELAY_ADMIN_CHAT_ID: ${{ secrets.YT_RELAY_ADMIN_CHAT_ID }}
+      YT_RELAY_ENABLED: "true"
+      YT_RELAY_DRY_RUN: "false"
+      MAX_AGE_HOURS: "48"
+      MAX_POSTS_PER_DAY: "8"
+      MIN_HOURS_BETWEEN_POSTS: "3"
+      YT_MAX_CAPTIONS_PER_RUN: "3"
+      YT_READY_QUEUE_MAX: "8"
+      YT_POST_STYLE: "photo"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Process any new admin messages
+        run: python -m yt_relay admin-bot-poll

@@ -1,9 +1,9 @@
-"""Supabase-backed storage for yt_channels / yt_queue.
+"""Supabase-backed storage for yt_channels / yt_queue / yt_admin_state.
 
-Table schema: see yt_relay_schema.sql. Mirrors the shape of database.py's
-EpisodeStore (same "thin wrapper around a Supabase table" pattern) but is a
-separate class against separate tables -- this package never imports
-database.py.
+Table schema: see yt_relay_schema.sql and yt_relay_admin_schema.sql. Mirrors
+the shape of database.py's EpisodeStore (same "thin wrapper around a
+Supabase table" pattern) but is a separate class against separate tables --
+this package never imports database.py.
 """
 import logging
 from dataclasses import dataclass
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 CHANNELS_TABLE = "yt_channels"
 QUEUE_TABLE = "yt_queue"
+ADMIN_STATE_TABLE = "yt_admin_state"
 
 STATUS_SEEDED = "seeded"
 STATUS_PENDING = "pending"
@@ -217,6 +218,18 @@ class YtStore:
         for row in resp.data:
             counts[row["status"]] = counts.get(row["status"], 0) + 1
         return counts
+
+    # --- admin bot state (singleton row, id=1) --------------------------
+
+    def get_admin_state(self) -> dict:
+        """Row seeded once by yt_relay_admin_schema.sql; the in-code default
+        here is only a safety net if that seed row is ever missing."""
+        resp = self.client.table(ADMIN_STATE_TABLE).select("*").eq("id", 1).limit(1).execute()
+        return resp.data[0] if resp.data else {"id": 1, "last_update_id": 0, "pending_action": None}
+
+    def set_admin_state(self, **fields) -> None:
+        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self.client.table(ADMIN_STATE_TABLE).update(fields).eq("id", 1).execute()
 
     def recent_errors(self, limit: int = 10) -> list[dict]:
         resp = (

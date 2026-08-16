@@ -33,7 +33,7 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       YT_TELEGRAM_CHANNEL_ID: ${{ secrets.YT_TELEGRAM_CHANNEL_ID }}
       YT_RELAY_ENABLED: "true"
-      YT_RELAY_DRY_RUN: "true"
+      YT_RELAY_DRY_RUN: "false"
       MAX_AGE_HOURS: "48"
       MAX_POSTS_PER_DAY: "8"
       MIN_HOURS_BETWEEN_POSTS: "3"

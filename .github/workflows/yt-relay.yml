@@ -26,6 +26,10 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      # Optional dedicated key -- see .env.example for why. When this secret
+      # isn't set, the expression below evaluates to an empty string and
+      # settings.py falls back to the shared GROQ_API_KEY above.
+      YT_RELAY_GROQ_API_KEY: ${{ secrets.YT_RELAY_GROQ_API_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       YT_TELEGRAM_CHANNEL_ID: ${{ secrets.YT_TELEGRAM_CHANNEL_ID }}
       YT_RELAY_ENABLED: "true"

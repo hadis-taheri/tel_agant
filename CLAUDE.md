@@ -387,6 +387,24 @@ and deterministic (feed -> deterministic cleanup -> one LLM call -> render -> se
 exactly once per video, purely as a text generator with a validated JSON contract, never as a
 decision-maker over what to do next.
 
+**`caption.py` shares the podcast pipeline's Groq account and its ~200k-tokens/day budget by
+default -- `YT_RELAY_GROQ_API_KEY` exists specifically to opt out of that.** `yt_relay/settings.py`
+uses `GROQ_LLM_MODEL` (same default, `qwen/qwen3.6-27b`) via the *same* `GROQ_API_KEY` unless
+`YT_RELAY_GROQ_API_KEY` is set, in which case that dedicated key takes priority. This matters because
+Groq's daily cap is account-wide per model, not per project, and the podcast pipeline's own
+`MIN_BACKLOG_INTERVAL_MINUTES` math (see above) already assumes it has the *entire* 200k-token budget
+to itself (~18-19 episodes/day at ~10-11k tokens/episode lands right at the ceiling by design). A
+caption call here costs roughly 1k tokens (title + up to 800 chars of cleaned description, no
+transcript), and with `YT_READY_QUEUE_MAX=8`/`MAX_POSTS_PER_DAY=8` gating how many get captioned per
+day, this feature adds on the order of 5,000-15,000 tokens/day on top of that -- real (confirmed via
+the same math both pipelines already document) but modest, roughly 3-8% of the cap. Both pipelines
+share `_generate_once`'s existing `@retry`/backoff, so a shared-budget 429 just adds latency rather
+than failing outright, and the cap resets daily regardless. `YT_RELAY_GROQ_API_KEY` (a second, free
+Groq account) removes this shared-budget risk entirely instead of just accepting it -- same
+dedicated-key-per-agent pattern the original spec called for with `ANTHROPIC_API_KEY_YT_RELAY`, kept
+optional here only because creating that second account is a manual step, not something any script in
+this repo can do on its own.
+
 **Long-form filtering is a URL prefix swap, not an API call**: `yt_relay/feed.py` fetches
 `https://www.youtube.com/feeds/videos.xml?playlist_id=UULF{channel_id[2:]}` -- YouTube's own
 "uploads minus Shorts" virtual playlist -- instead of the plain per-channel feed. The feed carries no

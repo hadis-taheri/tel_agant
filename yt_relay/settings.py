@@ -48,13 +48,22 @@ def load_settings() -> YtSettings:
     return YtSettings(
         supabase_url=_require("SUPABASE_URL"),
         supabase_key=_require("SUPABASE_KEY"),
-        groq_api_key=_require("GROQ_API_KEY"),
+        # YT_RELAY_GROQ_API_KEY is optional and takes priority when set --
+        # the podcast pipeline's own MIN_BACKLOG_INTERVAL_MINUTES math
+        # (see CLAUDE.md) already assumes it has the *entire* 200k-tokens/day
+        # Groq cap to itself; sharing GROQ_API_KEY with this feature eats a
+        # real (if modest, ~3-8%) slice of that margin. Falls back to the
+        # shared GROQ_API_KEY if no dedicated key is configured -- same
+        # dedicated-key pattern the original spec called for with
+        # ANTHROPIC_API_KEY_YT_RELAY, just optional here since a second Groq
+        # account has to be created by hand (this loader can't do that).
+        groq_api_key=os.getenv("YT_RELAY_GROQ_API_KEY") or _require("GROQ_API_KEY"),
         groq_llm_model=os.getenv("GROQ_LLM_MODEL", "qwen/qwen3.6-27b"),
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         telegram_channel_id=_require("YT_TELEGRAM_CHANNEL_ID"),
         enabled=os.getenv("YT_RELAY_ENABLED", "true").lower() == "true",
         dry_run=os.getenv("YT_RELAY_DRY_RUN", "true").lower() == "true",
-        post_style=os.getenv("YT_POST_STYLE", "preview"),
+        post_style=os.getenv("YT_POST_STYLE", "photo"),
         max_age_hours=int(os.getenv("MAX_AGE_HOURS", "48")),
         max_posts_per_day=int(os.getenv("MAX_POSTS_PER_DAY", "8")),
         min_hours_between_posts=int(os.getenv("MIN_HOURS_BETWEEN_POSTS", "3")),
